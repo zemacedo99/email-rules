@@ -152,6 +152,41 @@ def test_list_messages_capped() -> None:
     assert len(messages) == 3
 
 
+def test_move_message_posts_destination_and_returns_new_id() -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        seen["body"] = request.content
+        return httpx.Response(201, json={"Id": "new-id-after-move"})
+
+    with _client(handler) as client:
+        new_id = client.move_message("msg-1", "folder-9")
+
+    assert new_id == "new-id-after-move"
+    assert seen["method"] == "POST"
+    assert "messages/msg-1/move" in seen["url"]
+    assert b"folder-9" in seen["body"] and b"DestinationId" in seen["body"]
+
+
+def test_move_message_requires_ids() -> None:
+    """Empty message or folder ids are rejected before any HTTP request."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={})
+
+    with _client(handler) as client:
+        with pytest.raises(ValueError):
+            client.move_message("", "folder-9")
+        with pytest.raises(ValueError):
+            client.move_message("msg-1", "")
+
+    assert calls == []
+
+
 def test_owaclient_satisfies_provider() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"value": []})

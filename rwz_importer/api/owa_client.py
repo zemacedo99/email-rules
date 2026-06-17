@@ -285,6 +285,24 @@ class OwaClient:
         items = self._get_paged_capped(url, top)
         return [Message.from_api(i) for i in items]
 
+    def move_message(self, message_id: str, destination_folder_id: str) -> str:
+        """Move one message to a folder; return the moved copy's new id.
+
+        Uses ``POST messages/{id}/move`` with ``{"DestinationId": <folder id>}``.
+        The move yields a fresh message in the destination, so the API returns a
+        new ``Id`` (the original id no longer resolves).
+        """
+        if not message_id:
+            raise ValueError("A message id is required to move a message.")
+        if not destination_folder_id:
+            raise ValueError("A destination folder id is required to move a message.")
+        response = self._request(
+            "POST",
+            f"messages/{message_id}/move",
+            json={"DestinationId": destination_folder_id},
+        )
+        return (response.json() or {}).get("Id", "")
+
 
 def _retry_after_seconds(response: httpx.Response, *, default: float) -> float:
     value = response.headers.get("Retry-After")

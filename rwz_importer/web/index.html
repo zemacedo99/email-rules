@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>rwz-importer</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --ink: #1d2433; --muted: #6b7280;
+    --line: #e3e6eb; --accent: #2563eb; --accent-ink: #ffffff;
+    --good: #15803d; --good-bg: #dcfce7; --warn: #b45309; --warn-bg: #fef3c7;
+    --bad: #b91c1c; --bad-bg: #fee2e2; --chip: #eef2ff; --chip-ink: #3730a3;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--card);
+    border-bottom: 1px solid var(--line); padding: 12px 20px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .pill {
+    margin-left: auto; font-size: 12px; font-weight: 600; padding: 4px 10px;
+    border-radius: 999px; background: var(--bad-bg); color: var(--bad);
+  }
+  .pill.on { background: var(--good-bg); color: var(--good); }
+  main { max-width: 1000px; margin: 22px auto; padding: 0 20px 80px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px 22px; margin-bottom: 18px;
+  }
+  .card > h2 { margin: 0 0 4px; font-size: 16px; }
+  .card > .hint { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  h3 { font-size: 14px; margin: 18px 0 8px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+  input[type=text], input[type=password], input[type=number], textarea, select {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line);
+    border-radius: 8px; font: inherit; background: #fff; color: var(--ink);
+  }
+  textarea { resize: vertical; min-height: 56px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 220px; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .check input { width: auto; }
+  .check label { margin: 0; }
+  button {
+    font: inherit; font-weight: 600; cursor: pointer; border: 1px solid var(--line);
+    background: #fff; color: var(--ink); border-radius: 8px; padding: 8px 14px;
+  }
+  button:hover { border-color: #c3c8d1; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.primary:hover { filter: brightness(1.05); }
+  button.danger { color: var(--bad); border-color: #f0c2c2; }
+  button.danger:hover { background: var(--bad-bg); }
+  button.sm { padding: 4px 10px; font-size: 13px; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; align-items: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  td.right, th.right { text-align: right; white-space: nowrap; }
+  .chip {
+    display: inline-block; background: var(--chip); color: var(--chip-ink);
+    border-radius: 6px; padding: 1px 7px; font-size: 12px; margin: 1px 3px 1px 0;
+  }
+  .chip.flag { background: var(--warn-bg); color: var(--warn); }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; }
+  .empty { color: var(--muted); padding: 14px 2px; }
+  ol.steps { margin: 6px 0; padding-left: 20px; }
+  ol.steps li { margin: 4px 0; }
+  code { background: #eef0f3; padding: 1px 5px; border-radius: 5px; font-size: 13px; }
+  .note {
+    border-left: 3px solid var(--accent); background: #f8faff; padding: 8px 12px;
+    border-radius: 0 8px 8px 0; font-size: 13px; margin: 12px 0;
+  }
+  /* toast */
+  #toast {
+    position: fixed; right: 20px; bottom: 20px; max-width: 420px; z-index: 50;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .toast {
+    background: #111827; color: #fff; padding: 11px 14px; border-radius: 9px;
+    font-size: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.22); animation: pop .15s ease-out;
+  }
+  .toast.good { background: var(--good); }
+  .toast.bad { background: var(--bad); }
+  @keyframes pop { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
+  /* modal */
+  #scrim {
+    position: fixed; inset: 0; background: rgba(15,23,42,.5); z-index: 40;
+    display: none; align-items: flex-start; justify-content: center; padding: 5vh 16px;
+  }
+  #scrim.show { display: flex; }
+  .modal {
+    background: var(--card); border-radius: 14px; width: 100%; max-width: 640px;
+    max-height: 88vh; overflow: auto; padding: 22px 24px;
+  }
+  .modal h2 { margin: 0 0 4px; font-size: 17px; }
+  .hidden { display: none !important; }
+  .summary-line { font-size: 14px; margin: 8px 0; }
+  .big { font-size: 22px; font-weight: 700; }
+</style>
+</head>
+<body>
+<header>
+  <h1>rwz-importer</h1>
+  <span class="sub">Outlook rules for New Outlook / OWA</span>
+  <span id="connPill" class="pill">no token</span>
+</header>
+
+<main>
+  <!-- 1. Instructions ------------------------------------------------------ -->
+  <section class="card">
+    <h2>What this is</h2>
+    <p class="hint">Manage your New Outlook / Outlook-on-the-web inbox rules: review and edit
+      them, run them over the mail already in your inbox, get rule suggestions from your
+      recent mail, and import an Outlook Classic <code>.rwz</code> export.</p>
+
+    <h3>Getting a token</h3>
+    <ol class="steps">
+      <li>Sign in to <code>https://outlook.office.com</code> in your browser.</li>
+      <li>Open DevTools (<code>F12</code>) → <b>Network</b> tab.</li>
+      <li>Click any mail folder. Find a request to <code>…/api/v2.0/me/…</code>.</li>
+      <li>In its request headers, copy the <code>authorization</code> value after <code>Bearer&nbsp;</code>.</li>
+      <li>Paste it into <b>Setup</b> below. It is held in this server's memory only —
+        never written to disk, never shown back here, never sent anywhere but Outlook.</li>
+    </ol>
+
+    <div class="note">
+      <b>Safe by default.</b> Running rules over your inbox always shows a preview with a
+      match count first — <b>no mail moves until you confirm</b>. Creating or editing a rule
+      makes it active for <i>future</i> mail server-side; the <b>Run</b> button is what files the
+      <i>existing</i> backlog. Deleting a rule asks for confirmation. Cross-mailbox addresses are
+      flagged, never rewritten silently.
+    </div>
+  </section>
+
+  <!-- 2. Setup ------------------------------------------------------------- -->
+  <section class="card">
+    <h2>Setup</h2>
+    <p class="hint">Add the token (and, optionally, which mailbox you're working on). The token
+      stays in the server process memory only.</p>
+    <label for="token">OWA bearer token</label>
+    <input id="token" type="password" placeholder="paste the token from the Network tab" autocomplete="off" />
+    <div class="row">
+      <div>
+        <label for="mailbox">Mailbox (label only)</label>
+        <input id="mailbox" type="text" placeholder="you@example.com" />
+      </div>
+      <div>
+        <label for="baseUrl">API base URL</label>
+        <input id="baseUrl" type="text" />
+      </div>
+    </div>
+    <div class="actions">
+      <button class="primary" id="saveConfig">Save</button>
+      <button id="clearToken">Forget token</button>
+      <span id="configStatus" class="muted"></span>
+    </div>
+  </section>
+
+  <!-- 3. Rules (CRUD) ------------------------------------------------------ -->
+  <section class="card">
+    <h2>Inbox rules</h2>
+    <p class="hint">Your server-side rules, in order. Edit or delete them, add a new one, or
+      run them over the mail already sitting in your inbox.</p>
+    <div class="actions" style="margin-top:0">
+      <button class="primary" id="addRuleBtn">+ Add rule</button>
+      <button id="runAllBtn">Run all over inbox…</button>
+      <button id="refreshRules">Refresh</button>
+      <span class="muted" id="rulesMeta"></span>
+    </div>
+    <div id="rulesWrap" style="margin-top:14px">
+      <p class="empty">Add a token in Setup to load your rules.</p>
+    </div>
+  </section>
+
+  <!-- 5. Suggestions ------------------------------------------------------- -->
+  <section class="card">
+    <h2>Rule suggestions</h2>
+    <p class="hint">Scans recent message <b>metadata</b> (sender, subject, date — never bodies)
+      and proposes rules for traffic nothing currently files: high-volume senders, domain
+      clusters, and recurring <code>[tags]</code> in subjects.</p>
+    <div class="row">
+      <div><label for="sgTop">Messages to sample</label><input id="sgTop" type="number" value="300" min="20" max="1000" /></div>
+      <div><label for="sgSender">Min · same sender</label><input id="sgSender" type="number" value="3" min="1" /></div>
+      <div><label for="sgDomain">Min · same domain</label><input id="sgDomain" type="number" value="6" min="1" /></div>
+      <div><label for="sgSubject">Min · same tag</label><input id="sgSubject" type="number" value="4" min="1" /></div>
+    </div>
+    <div class="actions">
+      <button class="primary" id="suggestBtn">Scan inbox for patterns</button>
+      <span class="muted" id="suggestMeta"></span>
+    </div>
+    <div id="suggestWrap"></div>
+  </section>
+
+  <!-- 6. Import .rwz ------------------------------------------------------- -->
+  <section class="card">
+    <h2>Import a .rwz export</h2>
+    <p class="hint">Parse an Outlook Classic <code>.rwz</code> file (offline), review the rules,
+      then plan and apply them. Apply always shows a plan and requires a confirmation token —
+      nothing is written until you click Apply on a fresh plan.</p>
+    <div class="actions" style="margin-top:0">
+      <input id="rwzFile" type="file" accept=".rwz" />
+      <button class="primary" id="rwzParseBtn">Parse</button>
+    </div>
+    <div id="rwzWrap"></div>
+  </section>
+</main>
+
+<div id="scrim"><div class="modal" id="modal"></div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = { folders: [], folderById: {}, rules: [], rwz: null };
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function toast(msg, kind) {
+  const el = document.createElement("div");
+  el.className = "toast" + (kind ? " " + kind : "");
+  el.textContent = msg;
+  $("toast").appendChild(el);
+  setTimeout(() => el.remove(), kind === "bad" ? 6000 : 3500);
+}
+async function api(method, path, body, isForm) {
+  const opt = { method, headers: {} };
+  if (isForm) { opt.body = body; }
+  else if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const res = await fetch(path, opt);
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* empty */ }
+  if (!res.ok) {
+    const msg = data && data.error ? data.error : (method + " " + path + " failed (" + res.status + ")");
+    const err = new Error(msg); err.needsToken = data && data.needs_token; throw err;
+  }
+  return data;
+}
+function splitList(text) {
+  return (text || "").split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+/* ---- config ---------------------------------------------------------------- */
+async function loadConfig() {
+  const c = await api("GET", "/api/config");
+  $("mailbox").value = c.mailbox || "";
+  $("baseUrl").value = c.base_url || "";
+  setConnected(c.token_set);
+  return c;
+}
+function setConnected(on) {
+  const pill = $("connPill");
+  pill.textContent = on ? "token set" : "no token";
+  pill.classList.toggle("on", !!on);
+  $("configStatus").textContent = on ? "Token is set." : "No token yet.";
+}
+async function saveConfig() {
+  const body = { mailbox: $("mailbox").value, base_url: $("baseUrl").value };
+  const tok = $("token").value.trim();
+  if (tok) body.token = tok;
+  const c = await api("POST", "/api/config", body);
+  $("token").value = "";
+  setConnected(c.token_set);
+  toast("Setup saved.", "good");
+  if (c.token_set) { await refreshFolders(); await refreshRules(); }
+}
+async function clearToken() {
+  const c = await api("POST", "/api/config", { clear_token: true });
+  setConnected(c.token_set);
+  toast("Token forgotten.");
+}
+
+/* ---- folders / rules ------------------------------------------------------- */
+async function refreshFolders() {
+  state.folders = await api("GET", "/api/folders");
+  state.folderById = {};
+  for (const f of state.folders) state.folderById[f.id] = f.display_name;
+}
+function condChips(cond) {
+  cond = cond || {};
+  const bits = [];
+  (cond.fromAddresses || []).forEach((v) => bits.push('<span class="chip">from: ' + esc(v) + "</span>"));
+  (cond.senderContains || []).forEach((v) => bits.push('<span class="chip">sender~ ' + esc(v) + "</span>"));
+  (cond.subjectContains || []).forEach((v) => bits.push('<span class="chip">subject~ ' + esc(v) + "</span>"));
+  return bits.length ? bits.join(" ") : '<span class="muted">no conditions</span>';
+}
+async function refreshRules() {
+  const wrap = $("rulesWrap");
+  try {
+    if (!state.folders.length) await refreshFolders().catch(() => {});
+    state.rules = await api("GET", "/api/rules");
+  } catch (e) {
+    wrap.innerHTML = '<p class="empty">' + esc(e.message) + "</p>";
+    if (e.needsToken) setConnected(false);
+    return;
+  }
+  $("rulesMeta").textContent = state.rules.length + " rule" + (state.rules.length === 1 ? "" : "s");
+  if (!state.rules.length) { wrap.innerHTML = '<p class="empty">No rules yet. Add one above.</p>'; return; }
+  let html = '<table><thead><tr><th>#</th><th>Name</th><th>Conditions</th><th>Move to</th>'
+    + '<th>On</th><th class="right">Actions</th></tr></thead><tbody>';
+  state.rules.forEach((r) => {
+    const dest = r.move_to_folder_id ? (state.folderById[r.move_to_folder_id] || '<span class="mono">' + esc(r.move_to_folder_id) + "</span>") : '<span class="muted">—</span>';
+    html += "<tr>"
+      + "<td>" + esc(r.sequence == null ? "" : r.sequence) + "</td>"
+      + "<td><b>" + esc(r.name) + "</b></td>"
+      + "<td>" + condChips(r.conditions) + "</td>"
+      + "<td>" + dest + "</td>"
+      + "<td>" + (r.enabled ? "yes" : '<span class="muted">no</span>') + "</td>"
+      + '<td class="right">'
+      + '<button class="sm" data-run="' + esc(r.id) + '">Run</button> '
+      + '<button class="sm" data-edit="' + esc(r.id) + '">Edit</button> '
+      + '<button class="sm danger" data-del="' + esc(r.id) + '">Delete</button>'
+      + "</td></tr>";
+  });
+  wrap.innerHTML = html + "</tbody></table>";
+}
+
+/* ---- rule add / edit modal ------------------------------------------------- */
+function folderOptions(selectedName) {
+  let opts = '<option value="">(no move — match only)</option>';
+  state.folders.forEach((f) => {
+    opts += '<option' + (f.display_name === selectedName ? " selected" : "") + ">" + esc(f.display_name) + "</option>";
+  });
+  return opts;
+}
+function ruleModal(rule) {
+  const editing = !!rule;
+  const c = (rule && rule.conditions) || {};
+  const destName = rule && rule.move_to_folder_id ? (state.folderById[rule.move_to_folder_id] || "") : "";
+  openModal(
+    "<h2>" + (editing ? "Edit rule" : "Add rule") + "</h2>"
+    + '<p class="hint">Conditions: one value per line (or comma-separated). A rule with several'
+    + " values in a box matches <i>any</i> of them; boxes combine with <i>and</i>.</p>"
+    + '<label>Name</label><input id="m_name" type="text" value="' + esc(rule ? rule.name : "") + '" />'
+    + '<label>From addresses (exact)</label><textarea id="m_from">' + esc((c.fromAddresses || []).join("\n")) + "</textarea>"
+    + '<label>Subject contains</label><textarea id="m_subj">' + esc((c.subjectContains || []).join("\n")) + "</textarea>"
+    + '<label>Sender contains</label><textarea id="m_send">' + esc((c.senderContains || []).join("\n")) + "</textarea>"
+    + '<label>Move matching mail to</label>'
+    + '<select id="m_folder">' + folderOptions(destName) + "</select>"
+    + '<input id="m_folder_new" type="text" placeholder="…or type a new folder name" style="margin-top:8px" />'
+    + '<div class="check"><input id="m_stop" type="checkbox" checked /><label for="m_stop">Stop processing further rules</label></div>'
+    + '<div class="check"><input id="m_enabled" type="checkbox" ' + (!rule || rule.enabled ? "checked" : "") + ' /><label for="m_enabled">Enabled</label></div>'
+    + '<div class="actions"><button class="primary" id="m_save">' + (editing ? "Save changes" : "Create rule") + "</button>"
+    + '<button id="m_cancel">Cancel</button></div>'
+  );
+  $("m_save").onclick = async () => {
+    const name = $("m_name").value.trim();
+    if (!name) { toast("A name is required.", "bad"); return; }
+    const moveTo = $("m_folder_new").value.trim() || $("m_folder").value || null;
+    const body = {
+      name,
+      conditions: {
+        fromAddresses: splitList($("m_from").value),
+        subjectContains: splitList($("m_subj").value),
+        senderContains: splitList($("m_send").value),
+      },
+      move_to_folder: moveTo,
+      stop_processing: $("m_stop").checked,
+      enabled: $("m_enabled").checked,
+    };
+    try {
+      if (editing) await api("PUT", "/api/rules/" + encodeURIComponent(rule.id), body);
+      else await api("POST", "/api/rules", body);
+      closeModal();
+      toast(editing ? "Rule updated." : "Rule created.", "good");
+      await refreshFolders(); await refreshRules();
+    } catch (e) { toast(e.message, "bad"); }
+  };
+  $("m_cancel").onclick = closeModal;
+}
+async function deleteRule(id) {
+  const r = state.rules.find((x) => x.id === id);
+  if (!confirm('Delete rule "' + (r ? r.name : id) + '"? This removes it from the server.')) return;
+  try {
+    await api("DELETE", "/api/rules/" + encodeURIComponent(id));
+    toast("Rule deleted.");
+    await refreshRules();
+  } catch (e) { toast(e.message, "bad"); }
+}
+
+/* ---- run (preview -> confirm -> move) -------------------------------------- */
+async function runRules(ruleIds, title) {
+  let preview;
+  try {
+    preview = await api("POST", "/api/preview-run", ruleIds ? { rule_ids: ruleIds } : {});
+  } catch (e) { toast(e.message, "bad"); return; }
+
+  const total = preview.total_matches || 0;
+  const folders = new Set((preview.moves || []).map((m) => m.folder || m.folder_id));
+  let html = "<h2>" + esc(title) + "</h2>"
+    + '<p class="summary-line">Sampled <b>' + preview.sampled_messages + "</b> message(s) in "
+    + esc(preview.folder) + ".</p>"
+    + '<p class="summary-line"><span class="big">' + total + "</span> message(s) would be filed into "
+    + folders.size + " folder(s).</p>";
+  if (preview.skipped_no_folder && preview.skipped_no_folder.length)
+    html += '<p class="hint">Skipped (no destination folder): ' + esc(preview.skipped_no_folder.join(", ")) + "</p>";
+
+  const active = (preview.rules || []).filter((r) => r.match_count > 0);
+  if (active.length) {
+    html += "<table><thead><tr><th>Rule</th><th>Into</th><th class='right'>Matches</th></tr></thead><tbody>";
+    active.forEach((r) => {
+      html += "<tr><td>" + esc(r.name) + "</td><td>" + esc(r.move_to_folder || r.move_to_folder_id || "—")
+        + "</td><td class='right'>" + r.match_count + "</td></tr>";
+    });
+    html += "</tbody></table>";
+  }
+  html += '<div class="note">New mail is already filed automatically by these server-side rules. '
+    + "This only moves the matching mail already in your inbox.</div>";
+  html += '<div class="actions">'
+    + (total > 0 ? '<button class="primary" id="r_go">Move ' + total + " message(s)</button>" : "")
+    + '<button id="r_cancel">' + (total > 0 ? "Cancel" : "Close") + "</button></div>";
+  openModal(html);
+
+  $("r_cancel").onclick = closeModal;
+  if (total > 0) {
+    $("r_go").onclick = async () => {
+      $("r_go").disabled = true; $("r_go").textContent = "Moving…";
+      try {
+        const out = await api("POST", "/api/execute-run", { moves: preview.moves });
+        closeModal();
+        let msg = "Filed " + out.moved_count + " message(s).";
+        if (out.failed_count) msg += " " + out.failed_count + " failed.";
+        toast(msg, out.failed_count ? "bad" : "good");
+      } catch (e) { closeModal(); toast(e.message, "bad"); }
+    };
+  }
+}
+
+/* ---- suggestions ----------------------------------------------------------- */
+async function scanSuggestions() {
+  const wrap = $("suggestWrap");
+  wrap.innerHTML = '<p class="empty">Scanning…</p>';
+  let out;
+  try {
+    out = await api("POST", "/api/suggest", {
+      top: +$("sgTop").value, min_sender: +$("sgSender").value,
+      min_domain: +$("sgDomain").value, min_subject: +$("sgSubject").value,
+    });
+  } catch (e) { wrap.innerHTML = '<p class="empty">' + esc(e.message) + "</p>"; if (e.needsToken) setConnected(false); return; }
+
+  $("suggestMeta").textContent = "sampled " + out.sampled_messages + " message(s)";
+  const sg = out.suggestions || [];
+  if (!sg.length) { wrap.innerHTML = '<p class="empty">No new patterns found above the thresholds.</p>'; return; }
+  state.suggestions = sg;
+  let html = "<table><thead><tr><th>Why</th><th>Suggested rule</th><th>Into</th><th class='right'></th></tr></thead><tbody>";
+  sg.forEach((s, i) => {
+    const cond = (s.rule && s.rule.conditions) || s.conditions || {};
+    const dest = (s.rule && s.rule.actions && s.rule.actions.moveToFolder) || s.suggested_folder || "?";
+    html += "<tr><td>" + esc(s.reason || s.kind || "") + "</td>"
+      + "<td><b>" + esc((s.rule && s.rule.name) || s.name || "rule") + "</b><br>" + condChips(cond) + "</td>"
+      + "<td>" + esc(dest) + "</td>"
+      + '<td class="right"><button class="sm primary" data-sg="' + i + '">Add as rule</button></td></tr>';
+  });
+  wrap.innerHTML = html + "</tbody></table>";
+}
+async function addSuggestion(i) {
+  const s = (state.suggestions || [])[i];
+  if (!s) return;
+  const rule = s.rule || {};
+  const body = {
+    name: rule.name || s.name || "Suggested rule",
+    conditions: rule.conditions || s.conditions || {},
+    move_to_folder: (rule.actions && rule.actions.moveToFolder) || s.suggested_folder || null,
+    stop_processing: rule.actions ? rule.actions.stopProcessingRules : true,
+    enabled: true,
+  };
+  try {
+    await api("POST", "/api/rules", body);
+    toast("Added rule: " + body.name, "good");
+    await refreshFolders(); await refreshRules();
+  } catch (e) { toast(e.message, "bad"); }
+}
+
+/* ---- import .rwz ----------------------------------------------------------- */
+async function parseRwz() {
+  const f = $("rwzFile").files[0];
+  if (!f) { toast("Choose a .rwz file first.", "bad"); return; }
+  const fd = new FormData(); fd.append("file", f);
+  const wrap = $("rwzWrap");
+  wrap.innerHTML = '<p class="empty">Parsing…</p>';
+  try {
+    const out = await api("POST", "/api/rwz/parse", fd, true);
+    state.rwz = out;
+    renderRwz(out);
+  } catch (e) { wrap.innerHTML = '<p class="empty">' + esc(e.message) + "</p>"; }
+}
+function renderRwz(out) {
+  const parsed = out.parsed || {};
+  const rules = parsed.rules || [];
+  const flagged = parsed.flagged_cross_mailbox || [];
+  let html = '<p class="summary-line">Recovered <b>' + rules.length + "</b> rule(s) from <code>"
+    + esc(parsed.source_file || "file") + "</code>.</p>";
+  if (flagged.length)
+    html += '<div class="note"><b>Cross-mailbox flag:</b> ' + esc(flagged.join(", "))
+      + ". These addresses look like they belong to the source mailbox; they'll be skipped on "
+      + "apply unless you remap them (edit the rule after import, or use the CLI's --map-address).</div>";
+  html += "<table><thead><tr><th>Name</th><th>Conditions</th><th>Move to</th></tr></thead><tbody>";
+  rules.forEach((r) => {
+    const flag = flagged.includes(r.name) ? ' <span class="chip flag">review</span>' : "";
+    html += "<tr><td><b>" + esc(r.name) + "</b>" + flag + "</td><td>" + condChips(r.conditions)
+      + "</td><td>" + esc((r.actions && r.actions.moveToFolder) || "—") + "</td></tr>";
+  });
+  html += "</tbody></table>";
+  html += '<div class="actions"><button class="primary" id="rwz_plan">Plan apply…</button>'
+    + '<span class="muted">Dry-run first; nothing is written until you confirm.</span></div>';
+  html += '<div id="rwzPlan"></div>';
+  $("rwzWrap").innerHTML = html;
+  $("rwz_plan").onclick = planRwz;
+}
+async function planRwz() {
+  const box = $("rwzPlan");
+  box.innerHTML = '<p class="empty">Planning…</p>';
+  let plan;
+  try {
+    plan = await api("POST", "/api/rwz/plan", { rules_json: state.rwz.rules_json, mailbox: $("mailbox").value });
+  } catch (e) { box.innerHTML = '<p class="empty">' + esc(e.message) + "</p>"; if (e.needsToken) setConnected(false); return; }
+  state.rwzToken = plan.confirmation_token;
+  const s = plan.summary || {};
+  let html = '<div class="note">Plan: <b>' + (s.create || 0) + "</b> create · <b>" + (s.replace || 0)
+    + "</b> replace · <b>" + (s.skip || 0) + "</b> skip · <b>" + (s.folders || 0) + "</b> folder(s) to create.</div>";
+  if (plan.skipped_for_review && plan.skipped_for_review.length)
+    html += '<p class="hint">Held for review (cross-mailbox): ' + esc(plan.skipped_for_review.join(", ")) + "</p>";
+  html += "<table><thead><tr><th>Action</th><th>Rule</th><th>Into</th></tr></thead><tbody>";
+  (plan.rules || []).forEach((r) => {
+    html += "<tr><td>" + esc(r.action) + "</td><td>" + esc(r.name) + "</td><td>" + esc(r.move_to_folder || "—") + "</td></tr>";
+  });
+  html += "</tbody></table>";
+  const writes = (s.create || 0) + (s.replace || 0) + (s.folders || 0);
+  html += '<div class="actions">'
+    + (writes > 0 ? '<button class="primary" id="rwz_apply">Apply this plan</button>' : '<span class="muted">Nothing to apply.</span>')
+    + "</div>";
+  box.innerHTML = html;
+  if (writes > 0) $("rwz_apply").onclick = applyRwz;
+}
+async function applyRwz() {
+  if (!confirm("Apply this plan to the mailbox? Folders and rules will be created.")) return;
+  $("rwz_apply").disabled = true; $("rwz_apply").textContent = "Applying…";
+  try {
+    const out = await api("POST", "/api/rwz/apply", {
+      rules_json: state.rwz.rules_json, confirmation_token: state.rwzToken, mailbox: $("mailbox").value,
+    });
+    if (out.status === "applied") {
+      toast("Applied: " + (out.created_rules || []).length + " rule(s), "
+        + (out.created_folders || []).length + " folder(s).", "good");
+      await refreshFolders(); await refreshRules();
+      planRwz();
+    } else if (out.status === "confirmation_required") {
+      toast("Mailbox changed since the plan — re-planning.", "bad");
+      planRwz();
+    } else { toast(out.message || "Not applied.", "bad"); }
+  } catch (e) { toast(e.message, "bad"); }
+}
+
+/* ---- modal ----------------------------------------------------------------- */
+function openModal(html) { $("modal").innerHTML = html; $("scrim").classList.add("show"); }
+function closeModal() { $("scrim").classList.remove("show"); $("modal").innerHTML = ""; }
+$("scrim").addEventListener("click", (e) => { if (e.target === $("scrim")) closeModal(); });
+
+/* ---- wiring ---------------------------------------------------------------- */
+$("saveConfig").onclick = () => saveConfig().catch((e) => toast(e.message, "bad"));
+$("clearToken").onclick = () => clearToken().catch((e) => toast(e.message, "bad"));
+$("refreshRules").onclick = () => { refreshFolders().catch(() => {}); refreshRules(); };
+$("addRuleBtn").onclick = () => ruleModal(null);
+$("runAllBtn").onclick = () => runRules(null, "Run all rules over the inbox");
+$("suggestBtn").onclick = () => scanSuggestions();
+$("rwzParseBtn").onclick = () => parseRwz();
+$("rulesWrap").addEventListener("click", (e) => {
+  const t = e.target;
+  if (t.dataset.run) runRules([t.dataset.run], 'Run rule over the inbox');
+  else if (t.dataset.edit) ruleModal(state.rules.find((r) => r.id === t.dataset.edit));
+  else if (t.dataset.del) deleteRule(t.dataset.del);
+});
+$("suggestWrap").addEventListener("click", (e) => {
+  if (e.target.dataset.sg !== undefined) addSuggestion(+e.target.dataset.sg);
+});
+
+/* ---- boot ------------------------------------------------------------------ */
+(async () => {
+  try {
+    const c = await loadConfig();
+    if (c.token_set) { await refreshFolders().catch(() => {}); await refreshRules(); }
+  } catch (e) { toast(e.message, "bad"); }
+})();
+</script>
+</body>
+</html>

@@ -33,6 +33,7 @@ class FakeMailbox:
         self.created_folders: list[str] = []
         self.created_rules: list[dict] = []
         self.deleted_rule_ids: list[str] = []
+        self.moved_messages: list[tuple[str, str]] = []
 
     # -- reads --
     def list_inbox_folders(self) -> list[Folder]:
@@ -46,6 +47,12 @@ class FakeMailbox:
 
     def list_messages(self, *, folder: str = "Inbox", top: int = 200) -> list[Message]:
         return list(self._messages[:top])
+
+    def move_message(self, message_id: str, destination_folder_id: str) -> str:
+        self.moved_messages.append((message_id, destination_folder_id))
+        self._messages = [m for m in self._messages if m.id != message_id]
+        self._n += 1
+        return f"moved-{self._n}"
 
     # -- writes --
     def create_folder(self, display_name: str) -> Folder:
@@ -266,6 +273,179 @@ def test_cross_mailbox_flagged_is_skipped_unless_remapped() -> None:
     )
     assert out2["applied"] is True
     assert any(r["name"] == "LabOps" for r in fresh.created_rules)
+
+
+def test_create_rule_creates_folder_and_appends() -> None:
+    mailbox = FakeMailbox(rules=[ExistingRule(id="r1", display_name="A", sequence=1)])
+    out = service.create_rule(
+        mailbox,
+        name="News",
+        from_addresses=["  news@shop.com  ", ""],
+        move_to_folder="Newsletters",
+    )
+
+    assert out["created_folder"] == "Newsletters"
+    assert out["created"]["name"] == "News"
+    # Appended after the existing rule (sequence 1) -> sequence 2.
+    assert out["created"]["sequence"] == 2
+    assert mailbox.created_folders == ["Newsletters"]
+    # Whitespace trimmed, empties dropped.
+    assert out["created"]["conditions"]["fromAddresses"] == ["news@shop.com"]
+
+
+def test_create_rule_reuses_existing_folder() -> None:
+    mailbox = FakeMailbox(folders=[Folder(id="f1", display_name="Newsletters")])
+    out = service.create_rule(mailbox, name="News", move_to_folder="newsletters")
+
+    assert out["created_folder"] is None  # matched case-insensitively, not recreated
+    assert mailbox.created_folders == []
+    assert mailbox.created_rules[0]["name"] == "News"
+
+
+def test_create_rule_requires_name() -> None:
+    with pytest.raises(ValueError):
+        service.create_rule(FakeMailbox(), name="   ")
+
+
+def test_update_rule_replaces_reusing_sequence() -> None:
+    existing = ExistingRule(
+        id="old-1", display_name="Team", sequence=4, from_addresses=["old@team.com"]
+    )
+    mailbox = FakeMailbox(rules=[existing])
+
+    out = service.update_rule(
+        mailbox, "old-1", name="Team", from_addresses=["new@team.com"]
+    )
+
+    assert out["replaced_rule_id"] == "old-1"
+    assert "old-1" in mailbox.deleted_rule_ids
+    assert out["updated"]["sequence"] == 4  # old sequence reused
+    assert out["updated"]["conditions"]["fromAddresses"] == ["new@team.com"]
+
+
+def test_update_rule_unknown_id_raises() -> None:
+    with pytest.raises(ValueError):
+        service.update_rule(FakeMailbox(), "nope", name="X")
+
+
+def test_delete_rule_removes_and_reports_name() -> None:
+    mailbox = FakeMailbox(rules=[ExistingRule(id="r1", display_name="Spam", sequence=1)])
+    out = service.delete_rule(mailbox, "r1")
+
+    assert out == {"deleted_rule_id": "r1", "name": "Spam"}
+    assert mailbox.deleted_rule_ids == ["r1"]
+    assert mailbox.list_rules() == []
+
+
+def test_delete_rule_unknown_id_raises() -> None:
+    with pytest.raises(ValueError):
+        service.delete_rule(FakeMailbox(), "nope")
+
+
+def test_preview_run_matches_first_rule_only_and_writes_nothing() -> None:
+    rules = [
+        ExistingRule(
+            id="r1", display_name="Shop", sequence=1,
+            from_addresses=["news@shop.com"], move_to_folder_id="f-shop",
+        ),
+        # Lower priority rule that would also match on the domain substring.
+        ExistingRule(
+            id="r2", display_name="AnyShop", sequence=2,
+            sender_contains=["shop.com"], move_to_folder_id="f-any",
+        ),
+    ]
+    messages = [
+        Message(id="m1", subject="Deal", sender_address="news@shop.com", sender_name="Shop"),
+        Message(id="m2", subject="Other", sender_address="hr@corp.com", sender_name="HR"),
+    ]
+    mailbox = FakeMailbox(
+        rules=rules,
+        folders=[Folder(id="f-shop", display_name="Shop"), Folder(id="f-any", display_name="Any")],
+        messages=messages,
+    )
+
+    out = service.preview_run(mailbox)
+
+    assert out["sampled_messages"] == 2
+    assert out["total_matches"] == 1  # m1 assigned to r1 only, not double-counted
+    assert out["moves"][0] == {
+        "message_id": "m1",
+        "folder_id": "f-shop",
+        "folder": "Shop",
+        "rule_id": "r1",
+        "rule_name": "Shop",
+        "subject": "Deal",
+        "sender_address": "news@shop.com",
+    }
+    by_rule = {r["rule_id"]: r["match_count"] for r in out["rules"]}
+    assert by_rule == {"r1": 1, "r2": 0}
+    # Read-only: nothing moved.
+    assert mailbox.moved_messages == []
+
+
+def test_preview_run_skips_rule_without_folder_and_never_matches_empty() -> None:
+    rules = [
+        ExistingRule(id="r1", display_name="NoDest", sequence=1, subject_contains=["x"]),
+        ExistingRule(id="r2", display_name="NoCond", sequence=2, move_to_folder_id="f1"),
+    ]
+    messages = [Message(id="m1", subject="x marks", sender_address="a@b.com")]
+    mailbox = FakeMailbox(
+        rules=rules, folders=[Folder(id="f1", display_name="Dest")], messages=messages
+    )
+
+    out = service.preview_run(mailbox)
+
+    assert "NoDest" in out["skipped_no_folder"]  # no move target -> not runnable
+    assert out["total_matches"] == 0  # NoCond has no conditions -> never matches
+    assert out["moves"] == []
+
+
+def test_preview_run_can_target_specific_rule_ids() -> None:
+    rules = [
+        ExistingRule(id="r1", display_name="A", sequence=1,
+                     subject_contains=["hi"], move_to_folder_id="f1"),
+        ExistingRule(id="r2", display_name="B", sequence=2,
+                     subject_contains=["hi"], move_to_folder_id="f2"),
+    ]
+    messages = [Message(id="m1", subject="hi there", sender_address="a@b.com")]
+    mailbox = FakeMailbox(
+        rules=rules,
+        folders=[Folder(id="f1", display_name="F1"), Folder(id="f2", display_name="F2")],
+        messages=messages,
+    )
+
+    out = service.preview_run(mailbox, rule_ids=["r2"])
+
+    assert [r["rule_id"] for r in out["rules"]] == ["r2"]
+    assert out["moves"][0]["folder_id"] == "f2"
+
+
+def test_execute_run_moves_each_and_collects_failures() -> None:
+    messages = [
+        Message(id="m1", subject="a", sender_address="a@b.com"),
+        Message(id="m2", subject="b", sender_address="b@b.com"),
+    ]
+    mailbox = FakeMailbox(messages=messages)
+
+    out = service.execute_run(
+        mailbox,
+        [
+            {"message_id": "m1", "folder_id": "f1"},
+            {"message_id": "m2"},  # missing folder_id -> failure, not fatal
+        ],
+    )
+
+    assert out["applied"] is True
+    assert out["moved_count"] == 1 and out["failed_count"] == 1
+    assert mailbox.moved_messages == [("m1", "f1")]
+    assert out["failed"][0]["message_id"] == "m2"
+
+
+def test_execute_run_empty_is_noop() -> None:
+    mailbox = FakeMailbox()
+    out = service.execute_run(mailbox, [])
+    assert out["applied"] is False and out["moved_count"] == 0
+    assert mailbox.moved_messages == []
 
 
 def test_load_ruleset_requires_exactly_one_source() -> None:

@@ -30,6 +30,8 @@ from pathlib import Path
 from rwz_importer.api.owa_client import (
     ExistingRule,
     Folder,
+    Message,
+    OwaApiError,
     normalize_folder_name,
 )
 from rwz_importer.api.provider import MailboxProvider
@@ -56,6 +58,11 @@ __all__ = [
     "report",
     "compute_plan",
     "execute_plan",
+    "create_rule",
+    "update_rule",
+    "delete_rule",
+    "preview_run",
+    "execute_run",
 ]
 
 _ACTION_VERB = {
@@ -262,6 +269,230 @@ def execute_plan(
     return result
 
 
+# ------------------------------------------------------ single-rule CRUD --
+def create_rule(
+    provider: MailboxProvider,
+    *,
+    name: str,
+    from_addresses: list[str] | None = None,
+    subject_contains: list[str] | None = None,
+    sender_contains: list[str] | None = None,
+    move_to_folder: str | None = None,
+    stop_processing: bool = True,
+    enabled: bool = True,
+    sequence: int | None = None,
+    normalize_folders: bool = True,
+) -> dict:
+    """Create one server-side rule directly (the UI's "add rule" path).
+
+    The destination folder is created if missing; the rule is appended at the next
+    free sequence unless one is given. Use :func:`update_rule` to change an existing
+    rule — this never deletes or replaces one.
+    """
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("A rule name is required.")
+
+    folders = _collect_folders(provider)
+    folder_id, created_folder = _ensure_folder(
+        provider, folders, move_to_folder, normalize_folders
+    )
+    seq = sequence if (sequence and sequence >= 1) else _next_sequence(provider.list_rules())
+    created = provider.create_rule(
+        display_name=clean_name,
+        sequence=seq,
+        folder_id=folder_id,
+        from_addresses=_clean_values(from_addresses),
+        subject_contains=_clean_values(subject_contains),
+        sender_contains=_clean_values(sender_contains),
+        stop_processing=stop_processing,
+        enabled=enabled,
+    )
+    return {
+        "created": _existing_rule_view(created),
+        "created_folder": created_folder,
+    }
+
+
+def update_rule(
+    provider: MailboxProvider,
+    rule_id: str,
+    *,
+    name: str,
+    from_addresses: list[str] | None = None,
+    subject_contains: list[str] | None = None,
+    sender_contains: list[str] | None = None,
+    move_to_folder: str | None = None,
+    stop_processing: bool = True,
+    enabled: bool = True,
+    normalize_folders: bool = True,
+) -> dict:
+    """Replace an existing rule in place (delete-then-create, reusing its sequence).
+
+    This is the only delete the CRUD layer performs, and it is an explicit,
+    user-initiated edit — the moral equivalent of a confirmed ``REPLACE``. Raises
+    :class:`ValueError` if ``rule_id`` is not present on the server.
+    """
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("A rule name is required.")
+
+    existing = next((r for r in provider.list_rules() if r.id == rule_id), None)
+    if existing is None:
+        raise ValueError(f"No rule found with id {rule_id!r}.")
+
+    folders = _collect_folders(provider)
+    folder_id, created_folder = _ensure_folder(
+        provider, folders, move_to_folder, normalize_folders
+    )
+    seq = existing.sequence if existing.sequence and existing.sequence >= 1 else _next_sequence(
+        provider.list_rules()
+    )
+
+    provider.delete_rule(rule_id)
+    created = provider.create_rule(
+        display_name=clean_name,
+        sequence=seq,
+        folder_id=folder_id,
+        from_addresses=_clean_values(from_addresses),
+        subject_contains=_clean_values(subject_contains),
+        sender_contains=_clean_values(sender_contains),
+        stop_processing=stop_processing,
+        enabled=enabled,
+    )
+    return {
+        "updated": _existing_rule_view(created),
+        "replaced_rule_id": rule_id,
+        "created_folder": created_folder,
+    }
+
+
+def delete_rule(provider: MailboxProvider, rule_id: str) -> dict:
+    """Delete one rule by id (the CRUD "delete").
+
+    The UI must confirm with the user before calling this — it removes a rule
+    outside the plan/REPLACE flow. Raises :class:`ValueError` if the id is unknown.
+    """
+    existing = next((r for r in provider.list_rules() if r.id == rule_id), None)
+    if existing is None:
+        raise ValueError(f"No rule found with id {rule_id!r}.")
+    provider.delete_rule(rule_id)
+    return {"deleted_rule_id": rule_id, "name": existing.display_name}
+
+
+# --------------------------------------------------- run rules over backlog --
+def preview_run(
+    provider: MailboxProvider,
+    *,
+    rule_ids: list[str] | None = None,
+    folder: str = "Inbox",
+    top: int = 300,
+) -> dict:
+    """Preview which existing messages each rule *would* file — writes nothing.
+
+    For each runnable rule (one that moves to a folder) this finds the messages in
+    ``folder`` that match it. A message is assigned to the **first** matching rule in
+    sequence order, so nothing is scheduled to move to two places. The flat ``moves``
+    list is exactly what :func:`execute_run` consumes after the user confirms.
+    """
+    ordered = sorted(
+        provider.list_rules(), key=lambda r: (r.sequence is None, r.sequence or 0)
+    )
+    if rule_ids is not None:
+        wanted = set(rule_ids)
+        selected = [r for r in ordered if r.id in wanted]
+    else:
+        selected = ordered
+
+    runnable = [r for r in selected if r.move_to_folder_id]
+    skipped_no_folder = [r.display_name for r in selected if not r.move_to_folder_id]
+    folder_display = {f.id: f.display_name for f in _collect_folders(provider)}
+    messages = provider.list_messages(folder=folder, top=top)
+
+    per_rule: dict[str, list[Message]] = {r.id: [] for r in runnable}
+    moves: list[dict] = []
+    for message in messages:
+        for rule in runnable:
+            if _matches_rule(message, rule):
+                per_rule[rule.id].append(message)
+                moves.append(
+                    {
+                        "message_id": message.id,
+                        "folder_id": rule.move_to_folder_id,
+                        "folder": folder_display.get(rule.move_to_folder_id or ""),
+                        "rule_id": rule.id,
+                        "rule_name": rule.display_name,
+                        "subject": message.subject,
+                        "sender_address": message.sender_address,
+                    }
+                )
+                break  # first matching rule wins (respects ordering, no double-move)
+
+    rules_view = [
+        {
+            "rule_id": rule.id,
+            "name": rule.display_name,
+            "sequence": rule.sequence,
+            "move_to_folder_id": rule.move_to_folder_id,
+            "move_to_folder": folder_display.get(rule.move_to_folder_id or ""),
+            "match_count": len(per_rule[rule.id]),
+            "matches": [
+                {
+                    "message_id": m.id,
+                    "subject": m.subject,
+                    "sender_address": m.sender_address,
+                    "received": m.received,
+                }
+                for m in per_rule[rule.id]
+            ],
+        }
+        for rule in runnable
+    ]
+    return {
+        "folder": folder,
+        "sampled_messages": len(messages),
+        "rules": rules_view,
+        "skipped_no_folder": skipped_no_folder,
+        "total_matches": len(moves),
+        "moves": moves,
+    }
+
+
+def execute_run(provider: MailboxProvider, moves: list[dict] | None) -> dict:
+    """Move each confirmed message to its folder. Mutating — call only after preview.
+
+    ``moves`` is the list produced by :func:`preview_run` (or a user-selected subset);
+    each item needs ``message_id`` and ``folder_id``. Per-move failures (e.g. a message
+    already moved, so its id no longer resolves) are collected, not fatal.
+    """
+    moved: list[dict] = []
+    failed: list[dict] = []
+    for move in moves or []:
+        message_id = move.get("message_id")
+        folder_id = move.get("folder_id")
+        if not message_id or not folder_id:
+            failed.append(
+                {"message_id": message_id, "error": "missing message_id or folder_id"}
+            )
+            continue
+        try:
+            new_id = provider.move_message(message_id, folder_id)
+            moved.append(
+                {"message_id": message_id, "folder_id": folder_id, "new_id": new_id}
+            )
+        except OwaApiError as exc:
+            failed.append(
+                {"message_id": message_id, "folder_id": folder_id, "error": str(exc)}
+            )
+    return {
+        "applied": bool(moved),
+        "moved_count": len(moved),
+        "failed_count": len(failed),
+        "moved": moved,
+        "failed": failed,
+    }
+
+
 # --------------------------------------------------------------------- helpers --
 def _build_resolved_plan(
     provider: MailboxProvider,
@@ -359,6 +590,62 @@ def _resolve_folder_id(display: str | None, folder_ids: dict[str, str]) -> str |
         if key in folder_ids:
             return folder_ids[key]
     return None
+
+
+def _ensure_folder(
+    provider: MailboxProvider,
+    folders: list[Folder],
+    display: str | None,
+    normalize_folders: bool,
+) -> tuple[str | None, str | None]:
+    """Resolve ``display`` to a folder id, creating the folder if it is missing.
+
+    Returns ``(folder_id, created_display_or_None)``. An empty/None ``display`` means
+    the rule has no move target, so ``(None, None)`` is returned.
+    """
+    if not display or not display.strip():
+        return None, None
+    index: dict[str, str] = {}
+    for folder in folders:
+        if folder.display_name:
+            index[folder.display_name.strip().lower()] = folder.id
+            index[normalize_folder_name(folder.display_name).strip().lower()] = folder.id
+    for key in (display.strip().lower(), normalize_folder_name(display).strip().lower()):
+        if key in index:
+            return index[key], None
+    create_name = normalize_folder_name(display) if normalize_folders else display
+    created = provider.create_folder(create_name)
+    return created.id, created.display_name
+
+
+def _clean_values(values: list[str] | None) -> list[str] | None:
+    """Trim, drop empties, and return ``None`` if nothing is left (so it's omitted)."""
+    if not values:
+        return None
+    cleaned = [v.strip() for v in values if v and v.strip()]
+    return cleaned or None
+
+
+def _matches_rule(message: Message, rule: ExistingRule) -> bool:
+    """Does ``message`` satisfy ``rule``? AND across condition types, OR within each.
+
+    A rule with no conditions never matches — running it must never move everything.
+    """
+    sender = (message.sender_address or "").strip().lower()
+    subject = (message.subject or "").strip().lower()
+    checks: list[bool] = []
+    if rule.from_addresses:
+        froms = {a.strip().lower() for a in rule.from_addresses if a and a.strip()}
+        checks.append(bool(sender) and sender in froms)
+    if rule.sender_contains:
+        tokens = [t.strip().lower() for t in rule.sender_contains if t and t.strip()]
+        checks.append(bool(sender) and any(t in sender for t in tokens))
+    if rule.subject_contains:
+        tokens = [t.strip().lower() for t in rule.subject_contains if t and t.strip()]
+        checks.append(any(t in subject for t in tokens))
+    if not checks:
+        return False
+    return all(checks)
 
 
 def _collect_folders(provider: MailboxProvider) -> list[Folder]:

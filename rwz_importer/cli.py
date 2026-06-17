@@ -406,6 +406,26 @@ def token_help() -> None:
     click.echo(_TOKEN_HELP)
 
 
+# --------------------------------------------------------------------- web --
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host (loopback only).")
+@click.option("--port", default=8765, show_default=True, type=int, help="Bind port.")
+def web(host: str, port: int) -> None:
+    """Launch the local web UI (instructions, rules CRUD, run, suggestions, import).
+
+    The token is entered in the browser and held only in the server's memory. Needs
+    the web extra: ``pip install -e ".[web]"``.
+    """
+    try:
+        from rwz_importer.web.app import run as run_web
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on extras
+        raise click.UsageError(
+            f"The web UI needs extra packages ({exc.name}). Install them with: "
+            'pip install -e ".[web]"'
+        ) from exc
+    run_web(host=host, port=port)
+
+
 # --------------------------------------------------------------------- helpers --
 def _load_json(path: Path) -> RuleSet:
     return RuleSet.from_json(path.read_text(encoding="utf-8"))

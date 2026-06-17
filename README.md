@@ -19,16 +19,21 @@ hardcoded. The bundled `.rwz` is used only as a test fixture. Mailbox-specific c
 (excluding a rule, remapping an address) are driven entirely by flags or by editing the
 intermediate JSON.
 
-## Two ways to use it
+## Three ways to use it
 
 - **As a command-line tool** — the `parse → apply → validate → report` pipeline below.
+- **As a local web UI** — a single localhost page to read your instructions, paste a token,
+  manage rules (create / edit / delete), **run** rules over the mail already in your inbox
+  (preview first), get **suggestions** from recent mail, and import a `.rwz`. See
+  [Use it from a browser (local web UI)](#use-it-from-a-browser-local-web-ui).
 - **As an MCP server an agent drives** — the same operations exposed as tools an AI agent
   (e.g. Claude Code) can call: inspect your folders, rules and recent mail, **suggest new
   rules** from patterns it spots, and **apply changes under a strict confirmation gate**.
   See [Use it from an agent (MCP server)](#use-it-from-an-agent-mcp-server).
 
-Both share one engine, so the safety rules (dry-run first, never delete outside a
-confirmed replace, never rewrite a cross-mailbox address silently) hold either way.
+All three share one engine, so the safety rules (dry-run/preview first, never delete
+outside a confirmed replace, never rewrite a cross-mailbox address silently) hold whichever
+you use.
 
 ## Requirements
 
@@ -51,6 +56,10 @@ This installs the `rwz-importer` console command. You can also run it as a modul
 The `dev` extra also pulls in the MCP SDK and the `rwz-importer-mcp` command used by the
 [agent / MCP server](#use-it-from-an-agent-mcp-server). To get just that without the test
 tooling, install the `mcp` extra: `pip install -e ".[mcp]"`.
+
+The `web` extra (Starlette + uvicorn) installs the `rwz-importer-web` command and the
+`rwz-importer web` subcommand for the [local web UI](#use-it-from-a-browser-local-web-ui):
+`pip install -e ".[web]"`.
 
 ## The pipeline
 
@@ -165,6 +174,39 @@ mapping, `apply` will:
 - under `--yes` (or a non-interactive shell), **skip it with a warning** — it is never
   silently rewritten.
 
+## Use it from a browser (local web UI)
+
+A small single-page UI over the same engine, for people who'd rather click than type
+commands. Install the extra and start it:
+
+```powershell
+pip install -e ".[web]"
+rwz-importer web                 # serves http://127.0.0.1:8765
+# or: rwz-importer-web   |   python -m rwz_importer.web.app   |   rwz-importer web --port 9000
+```
+
+Open the printed URL. The page has five parts, top to bottom:
+
+1. **Instructions** — what the tool does and the step-by-step for getting a token.
+2. **Setup** — paste your OWA token (and, optionally, a mailbox label). "Forget token"
+   clears it from memory.
+3. **Inbox rules (CRUD)** — your server-side rules in order; add, edit, or delete them, with
+   a folder picker that can create a new destination folder.
+4. **Run** — **Run** (per rule) or **Run all** files the mail *already sitting in your inbox*.
+   It always shows a **preview with a match count first; no mail moves until you confirm**.
+   (New mail is filed automatically by the server-side rule — Run is just for the backlog.)
+5. **Rule suggestions** — scans recent message *metadata* (never bodies) and proposes rules
+   for unfiled patterns; "Add as rule" creates one. There's also a **`.rwz` import** that
+   parses offline, then plans and applies through the same confirmation gate as the CLI.
+
+**Security model.** The token is held **only in the server process's memory** (it can be
+seeded from `OWA_TOKEN`), is **never written to disk**, **never sent back to the browser**
+(the UI only learns whether one is set), and **never appears in a URL or log**. The server
+**binds to loopback only** — `rwz-importer web --host …` refuses any non-loopback address
+because the process holds your token. All the engine's safety guarantees (preview/dry-run
+first, delete only inside a confirmed REPLACE, never delete a folder, cross-mailbox addresses
+skipped unless explicitly remapped) apply here too. Deleting a rule asks for confirmation.
+
 ## Use it from an agent (MCP server)
 
 The same engine is exposed over the **Model Context Protocol** so an agent (Claude Code, or
@@ -229,14 +271,19 @@ part of a confirmed `REPLACE`.
 
 ## Safety guarantees
 
-These hold whether you use the CLI or the MCP server:
+These hold whether you use the CLI, the web UI, or the MCP server:
 
-- **Dry-run is the default.** The CLI writes nothing without `--yes`/confirmation (a
-  non-interactive shell stays in dry-run instead of hanging); the MCP `apply_plan` writes
-  nothing without `confirm=true` **and** a matching `confirmation_token`.
-- **No credentials on disk or in chat.** The token comes from `--token`/`$OWA_TOKEN` (CLI)
-  or the server's `OWA_TOKEN` env (MCP) only — never a tool argument, never written out.
-- **Never deletes a rule** except as part of a confirmed `REPLACE`.
+- **Dry-run / preview is the default.** The CLI writes nothing without `--yes`/confirmation
+  (a non-interactive shell stays in dry-run instead of hanging); the MCP `apply_plan` writes
+  nothing without `confirm=true` **and** a matching `confirmation_token`; the web UI shows a
+  plan (for apply) or a match count (for run) and writes only after you click confirm.
+- **No mail moves without confirmation.** The web UI's "Run" files the existing inbox backlog
+  only after showing exactly how many messages would move; nothing is moved on a preview.
+- **No credentials on disk or in chat.** The token comes from `--token`/`$OWA_TOKEN` (CLI),
+  the server's `OWA_TOKEN` env (MCP), or in-memory entry in the browser (web) — never written
+  to disk, never returned to the client, never logged.
+- **Never deletes a rule** except as part of a confirmed `REPLACE` (or an explicit, confirmed
+  delete in the web UI's rule CRUD).
 - **Never deletes a folder.** Folders are only ever created.
 - **Cross-mailbox addresses are flagged**, never transformed (or applied) behind your back.
 
