@@ -78,6 +78,32 @@
     border-left: 3px solid var(--accent); background: #f8faff; padding: 8px 12px;
     border-radius: 0 8px 8px 0; font-size: 13px; margin: 12px 0;
   }
+  .signin {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    background: #f8faff; border: 1px solid #dbe4ff; border-radius: 10px; padding: 14px 16px;
+  }
+  .signin .muted { font-size: 13px; }
+  details.advanced { margin-top: 16px; border-top: 1px dashed var(--line); padding-top: 10px; }
+  details.advanced summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
+  details.advanced[open] summary { margin-bottom: 6px; }
+  a.plain { text-decoration: none; }
+  .code-box {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 26px;
+    font-weight: 700; letter-spacing: .12em; background: #0b1220; color: #fff;
+    padding: 8px 16px; border-radius: 10px; display: inline-block; user-select: all;
+  }
+  pre.snippet {
+    background: #0b1220; color: #e5e7eb; padding: 12px 14px; border-radius: 10px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11.5px;
+    line-height: 1.45; overflow: auto; max-height: 190px; margin: 8px 0;
+    white-space: pre-wrap; word-break: break-word; user-select: all;
+  }
+  .spin {
+    display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line);
+    border-top-color: var(--accent); border-radius: 50%; vertical-align: -2px;
+    animation: rot .8s linear infinite; margin-right: 6px;
+  }
+  @keyframes rot { to { transform: rotate(360deg); } }
   /* toast */
   #toast {
     position: fixed; right: 20px; bottom: 20px; max-width: 420px; z-index: 50;
@@ -121,15 +147,19 @@
       them, run them over the mail already in your inbox, get rule suggestions from your
       recent mail, and import an Outlook Classic <code>.rwz</code> export.</p>
 
-    <h3>Getting a token</h3>
+    <h3>Connecting your mailbox</h3>
+    <p class="hint" style="margin:0 0 8px">Two ways — pick one in <b>Setup</b> below:</p>
     <ol class="steps">
-      <li>Sign in to <code>https://outlook.office.com</code> in your browser.</li>
-      <li>Open DevTools (<code>F12</code>) → <b>Network</b> tab.</li>
-      <li>Click any mail folder. Find a request to <code>…/api/v2.0/me/…</code>.</li>
-      <li>In its request headers, copy the <code>authorization</code> value after <code>Bearer&nbsp;</code>.</li>
-      <li>Paste it into <b>Setup</b> below. It is held in this server's memory only —
-        never written to disk, never shown back here, never sent anywhere but Outlook.</li>
+      <li><b>Sign in with Microsoft (easiest).</b> Click the <b>Sign in with Microsoft</b>
+        button, open the page it shows, type the short code, and finish signing in as
+        usual. The token is captured automatically — no DevTools, no copy/paste.</li>
+      <li><b>Paste a token manually.</b> Use this if your organisation blocks the button
+        above (some do). <b>Setup</b> has a one-click <i>console snippet</i> that grabs the
+        token from a tab you're already signed in to — no Network-tab hunting.</li>
     </ol>
+    <p class="hint" style="margin:8px 0 0">Either way, the token is held in this server's
+      memory only — never written to disk, never shown back here, never sent anywhere but
+      Microsoft. It expires after about an hour; just sign in again.</p>
 
     <div class="note">
       <b>Safe by default.</b> Running rules over your inbox always shows a preview with a
@@ -143,11 +173,16 @@
   <!-- 2. Setup ------------------------------------------------------------- -->
   <section class="card">
     <h2>Setup</h2>
-    <p class="hint">Add the token (and, optionally, which mailbox you're working on). The token
-      stays in the server process memory only.</p>
-    <label for="token">OWA bearer token</label>
-    <input id="token" type="password" placeholder="paste the token from the Network tab" autocomplete="off" />
-    <div class="row">
+    <p class="hint">Connect your mailbox. The token stays in this server's memory only —
+      never written to disk, never shown back here.</p>
+
+    <div class="signin">
+      <button class="primary" id="signInBtn">Sign in with Microsoft</button>
+      <span class="muted">Opens a Microsoft sign-in page and captures the token
+        automatically — no DevTools needed.</span>
+    </div>
+
+    <div class="row" style="margin-top:14px">
       <div>
         <label for="mailbox">Mailbox (label only)</label>
         <input id="mailbox" type="text" placeholder="you@example.com" />
@@ -157,6 +192,28 @@
         <input id="baseUrl" type="text" />
       </div>
     </div>
+
+    <details class="advanced" id="manualBox">
+      <summary>Paste a token manually (use this if sign-in is blocked)</summary>
+      <p class="hint" style="margin:8px 0 6px">If <b>Sign in with Microsoft</b> is blocked by your
+        organisation, grab the token from a browser tab that's <i>already</i> signed in to Outlook —
+        that session is allowed, so this always works:</p>
+      <ol class="steps">
+        <li>Open <code>https://outlook.office.com</code> and let your mailbox finish loading.</li>
+        <li>Press <code>F12</code> → <b>Console</b> tab.</li>
+        <li><button class="sm" id="copySnippet">Copy console snippet</button>, paste it at the console
+          prompt, and press <b>Enter</b>. It finds your Outlook token and copies it to the clipboard.
+          <span class="muted">(If the console warns about pasting, type <code>allow pasting</code> first.)</span></li>
+        <li>Come back here, paste it below, and click <b>Save</b>.</li>
+      </ol>
+      <pre class="snippet" id="tokenSnippet"></pre>
+      <label for="token">OWA bearer token</label>
+      <input id="token" type="password" placeholder="paste the token here" autocomplete="off" />
+      <p class="hint" style="margin:6px 0 0">Alternative: in the <b>Network</b> tab, open any request to
+        <code>…/api/v2.0/me/…</code> and copy the <code>authorization</code> header value after
+        <code>Bearer&nbsp;</code> (it looks like <code class="mono">eyJ0eXAiOiJKV1Q…</code>).</p>
+    </details>
+
     <div class="actions">
       <button class="primary" id="saveConfig">Save</button>
       <button id="clearToken">Forget token</button>
@@ -221,6 +278,30 @@
 const $ = (id) => document.getElementById(id);
 const state = { folders: [], folderById: {}, rules: [], rwz: null };
 
+// Pasted into the DevTools console on outlook.office.com: pulls the Outlook
+// access token out of the (MSAL) token cache and copies it to the clipboard.
+const TOKEN_SNIPPET = `(() => {
+  const aud = (t) => { try { const p = (t.split(".")[1] || ""); return (JSON.parse(atob(p.replace(/-/g, "+").replace(/_/g, "/"))) || {}).aud || ""; } catch (e) { return ""; } };
+  const owa = (s) => { s = (s || "").toLowerCase(); return s.indexOf("outlook.office.com") >= 0 || s.indexOf("00000002-0000-0ff1-ce00-000000000000") >= 0; };
+  const hits = [];
+  const scan = (store) => {
+    for (let i = 0; i < store.length; i++) {
+      const raw = store.getItem(store.key(i));
+      if (!raw) continue;
+      let o = null; try { o = JSON.parse(raw); } catch (e) {}
+      if (o && o.credentialType === "AccessToken" && typeof o.secret === "string") {
+        if (owa(aud(o.secret)) || owa(o.target)) hits.push(o.secret);
+      } else if (raw.indexOf("eyJ") === 0 && owa(aud(raw))) {
+        hits.push(raw);
+      }
+    }
+  };
+  scan(localStorage); scan(sessionStorage);
+  if (!hits.length) { console.warn("No Outlook token found. Open https://outlook.office.com, let the mailbox load, then run this again."); return; }
+  try { copy(hits[0]); console.log("%cOutlook token copied to clipboard - paste it into rwz-importer.", "color:#15803d;font-weight:bold"); } catch (e) { console.log("Copy the token below:"); }
+  console.log(hits[0]);
+})();`;
+
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -277,6 +358,71 @@ async function clearToken() {
   const c = await api("POST", "/api/config", { clear_token: true });
   setConnected(c.token_set);
   toast("Token forgotten.");
+}
+
+/* ---- sign in with Microsoft (device-code flow) ----------------------------- */
+let authStop = null;                       // set while a sign-in is in flight
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function signIn() {
+  let start;
+  try { start = await api("POST", "/api/auth/start", {}); }
+  catch (e) { toast(e.message, "bad"); return; }
+
+  const uri = start.verification_uri || "https://microsoft.com/devicelogin";
+  const uriComplete = start.verification_uri_complete || uri;
+  const code = start.user_code || "";
+  let cancelled = false;
+  authStop = () => { cancelled = true; api("POST", "/api/auth/cancel", {}).catch(() => {}); };
+
+  openModal(
+    "<h2>Sign in with Microsoft</h2>"
+    + '<p class="summary-line"><b>1.</b> Open the sign-in page:</p>'
+    + '<p style="margin:4px 0 14px"><a class="plain" href="' + esc(uriComplete) + '" target="_blank" rel="noopener">'
+    + '<button class="primary">Open sign-in page ↗</button></a> '
+    + '<span class="muted mono">' + esc(uri) + "</span></p>"
+    + '<p class="summary-line"><b>2.</b> Enter this code if asked:</p>'
+    + '<p style="margin:4px 0 14px"><span class="code-box" id="auth_code">' + esc(code) + "</span> "
+    + '<button class="sm" id="auth_copy">Copy</button></p>'
+    + '<p class="summary-line" id="auth_status"><span class="spin"></span>Waiting for you to finish signing in…</p>'
+    + '<div class="actions"><button id="auth_cancel">Cancel</button></div>'
+  );
+  $("auth_copy").onclick = () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(code).catch(() => {});
+    toast("Code copied.");
+  };
+  $("auth_cancel").onclick = closeModal;   // closeModal stops the poll loop
+
+  let interval = Math.max(1, start.interval || 5);
+  while (!cancelled) {
+    await sleep(interval * 1000);
+    if (cancelled) break;
+    let out;
+    try { out = await api("POST", "/api/auth/poll", {}); }
+    catch (e) { continue; }               // transient; keep polling
+    if (out.status === "complete") {
+      authStop = null; closeModal();
+      setConnected(true);
+      toast("Signed in.", "good");
+      await refreshFolders().catch(() => {}); await refreshRules();
+      return;
+    }
+    if (out.status === "slow_down") { interval += 5; continue; }
+    if (out.status === "pending") { continue; }
+    authStop = null; closeModal();         // error / expired / idle
+    toast(out.error_description || out.error || "Sign-in failed.", "bad");
+    offerManual();                          // CA often blocks device-code; show the fallback
+    return;
+  }
+}
+
+/* Reveal the manual-token fallback (e.g. when org policy blocks device-code). */
+function offerManual() {
+  const box = $("manualBox");
+  if (!box) return;
+  box.open = true;
+  box.scrollIntoView({ behavior: "smooth", block: "center" });
+  toast("If sign-in keeps failing, your org may block it — use “Paste a token manually” just below.");
 }
 
 /* ---- folders / rules ------------------------------------------------------- */
@@ -562,10 +708,22 @@ async function applyRwz() {
 
 /* ---- modal ----------------------------------------------------------------- */
 function openModal(html) { $("modal").innerHTML = html; $("scrim").classList.add("show"); }
-function closeModal() { $("scrim").classList.remove("show"); $("modal").innerHTML = ""; }
+function closeModal() {
+  if (authStop) { authStop(); authStop = null; }   // stop any sign-in poll loop
+  $("scrim").classList.remove("show"); $("modal").innerHTML = "";
+}
 $("scrim").addEventListener("click", (e) => { if (e.target === $("scrim")) closeModal(); });
 
 /* ---- wiring ---------------------------------------------------------------- */
+$("signInBtn").onclick = () => signIn();
+$("tokenSnippet").textContent = TOKEN_SNIPPET;
+$("copySnippet").onclick = () => {
+  const done = () => toast("Snippet copied — paste it in the console on outlook.office.com.", "good");
+  if (navigator.clipboard) navigator.clipboard.writeText(TOKEN_SNIPPET).then(done).catch(() => {
+    toast("Select the snippet text below and copy it (Ctrl+C).", "bad");
+  });
+  else toast("Select the snippet text below and copy it (Ctrl+C).", "bad");
+};
 $("saveConfig").onclick = () => saveConfig().catch((e) => toast(e.message, "bad"));
 $("clearToken").onclick = () => clearToken().catch((e) => toast(e.message, "bad"));
 $("refreshRules").onclick = () => { refreshFolders().catch(() => {}); refreshRules(); };

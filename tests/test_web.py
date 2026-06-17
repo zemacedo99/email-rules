@@ -36,7 +36,7 @@ def test_index_is_served(client: TestClient) -> None:
     res = client.get("/")
     assert res.status_code == 200
     assert "rwz-importer" in res.text
-    assert "Getting a token" in res.text  # the instructions panel rendered
+    assert "Sign in with Microsoft" in res.text  # the easy sign-in path rendered
 
 
 def test_config_reports_token_set_but_never_returns_token(client: TestClient) -> None:
@@ -51,6 +51,49 @@ def test_config_reports_token_set_but_never_returns_token(client: TestClient) ->
 
     cleared = client.post("/api/config", json={"clear_token": True}).json()
     assert cleared["token_set"] is False
+
+
+def test_auth_start_returns_code_but_never_the_device_secret(client, monkeypatch) -> None:
+    canned = {
+        "device_code": "DEV-SECRET-123",  # must stay server-side
+        "user_code": "ABCD-EFGH",
+        "verification_uri": "https://microsoft.com/devicelogin",
+        "verification_uri_complete": "https://microsoft.com/devicelogin?otc=ABCD-EFGH",
+        "expires_in": 900, "interval": 5,
+        "_client_id": "cid", "_tenant": "common",
+        "_authority": "https://login.microsoftonline.com",
+    }
+    monkeypatch.setattr("rwz_importer.auth.start_device_code", lambda **kw: dict(canned))
+    res = client.post("/api/auth/start", json={})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["user_code"] == "ABCD-EFGH"
+    assert body["verification_uri"].endswith("devicelogin")
+    assert "device_code" not in body
+    assert "DEV-SECRET-123" not in res.text  # the polling secret never reaches the browser
+
+
+def test_auth_poll_completes_sets_token_without_echoing_it(client, monkeypatch) -> None:
+    monkeypatch.setattr("rwz_importer.auth.start_device_code", lambda **kw: {
+        "device_code": "DEV", "user_code": "X", "verification_uri": "u",
+        "expires_in": 900, "interval": 5,
+        "_client_id": "cid", "_tenant": "common", "_authority": "a",
+    })
+    client.post("/api/auth/start", json={})  # arms the pending device-code state
+
+    monkeypatch.setattr("rwz_importer.auth.poll_token_once", lambda **kw: {
+        "status": "complete", "access_token": "SECRET-TOKEN", "expires_in": 3600,
+    })
+    res = client.post("/api/auth/poll", json={})
+    assert res.json() == {"status": "complete", "token_set": True}
+    assert "SECRET-TOKEN" not in res.text  # the token value is never echoed
+
+    cfg = client.get("/api/config").json()
+    assert cfg["token_set"] is True and "token" not in cfg
+
+
+def test_auth_poll_without_a_pending_signin_is_idle(client) -> None:
+    assert client.post("/api/auth/poll", json={}).json()["status"] == "idle"
 
 
 def test_live_endpoint_requires_token_with_default_factory(monkeypatch) -> None:

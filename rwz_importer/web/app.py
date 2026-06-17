@@ -15,17 +15,19 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator
 
+import httpx
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
-from rwz_importer import service
+from rwz_importer import auth, service
 from rwz_importer.api.owa_client import DEFAULT_BASE_URL, OwaApiError, OwaClient
 from rwz_importer.api.provider import MailboxProvider
 
@@ -45,6 +47,9 @@ class _Config:
         self.token: str | None = os.environ.get("OWA_TOKEN") or None
         self.mailbox: str | None = None
         self.base_url: str = os.environ.get("OWA_BASE_URL") or DEFAULT_BASE_URL
+        # Pending device-code sign-in, if one is in flight. Holds the secret
+        # device_code + poll settings; never serialised to the browser.
+        self.device: dict | None = None
 
     def public_view(self) -> dict:
         """Config safe to send to the browser — the token value is never included."""
@@ -108,6 +113,84 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
         if body.get("base_url"):
             config.base_url = str(body["base_url"]).strip()
         return JSONResponse(config.public_view())
+
+    # -- sign in with Microsoft (device code; token stays in memory) ------------
+    async def post_auth_start(request: Request) -> Response:
+        def job() -> object:
+            info = auth.start_device_code()
+            config.device = {
+                "device_code": info["device_code"],
+                "client_id": info.get("_client_id"),
+                "tenant": info.get("_tenant"),
+                "authority": info.get("_authority"),
+                "interval": max(1, int(info.get("interval", 5))),
+                "deadline": time.monotonic() + int(info.get("expires_in", 900)),
+            }
+            # Only the user-facing bits cross to the browser — never device_code.
+            return {
+                "user_code": info.get("user_code"),
+                "verification_uri": info.get("verification_uri")
+                or info.get("verification_url"),
+                "verification_uri_complete": info.get("verification_uri_complete"),
+                "message": info.get("message"),
+                "interval": config.device["interval"],
+                "expires_in": int(info.get("expires_in", 900)),
+            }
+
+        try:
+            result = await run_in_threadpool(job)
+        except auth.AuthError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except httpx.HTTPError as exc:
+            return JSONResponse(
+                {"error": f"Could not reach Microsoft sign-in: {exc}"}, status_code=502
+            )
+        return JSONResponse(result)
+
+    async def post_auth_poll(request: Request) -> Response:
+        def job() -> object:
+            dev = config.device
+            if not dev:
+                return {"status": "idle"}
+            if time.monotonic() >= dev["deadline"]:
+                config.device = None
+                return {
+                    "status": "error",
+                    "error": "expired_token",
+                    "error_description": "The sign-in code expired. Start again.",
+                }
+            out = auth.poll_token_once(
+                device_code=dev["device_code"],
+                client_id=dev["client_id"],
+                tenant=dev["tenant"],
+                authority=dev["authority"],
+            )
+            if out["status"] == "complete":
+                config.token = out["access_token"]  # in-memory only
+                config.device = None
+                return {"status": "complete", "token_set": True}
+            if out["status"] in ("pending", "slow_down"):
+                return {"status": out["status"]}
+            config.device = None
+            return {
+                "status": "error",
+                "error": out.get("error"),
+                "error_description": out.get("error_description"),
+            }
+
+        # Poll always answers 200 with a status the client loop can read; even a
+        # network blip becomes a soft error rather than throwing in the browser.
+        try:
+            result = await run_in_threadpool(job)
+        except (auth.AuthError, httpx.HTTPError) as exc:
+            return JSONResponse(
+                {"status": "error", "error": "network", "error_description": str(exc)}
+            )
+        return JSONResponse(result)
+
+    async def post_auth_cancel(request: Request) -> Response:
+        config.device = None
+        return JSONResponse({"status": "cancelled"})
 
     # -- rules CRUD -------------------------------------------------------------
     async def get_rules(request: Request) -> Response:
@@ -251,6 +334,9 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
         Route("/", index, methods=["GET"]),
         Route("/api/config", get_config, methods=["GET"]),
         Route("/api/config", post_config, methods=["POST"]),
+        Route("/api/auth/start", post_auth_start, methods=["POST"]),
+        Route("/api/auth/poll", post_auth_poll, methods=["POST"]),
+        Route("/api/auth/cancel", post_auth_cancel, methods=["POST"]),
         Route("/api/rules", get_rules, methods=["GET"]),
         Route("/api/rules", post_rules, methods=["POST"]),
         Route("/api/rules/{rule_id}", rules_item, methods=["PUT", "DELETE"]),

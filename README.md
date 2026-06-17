@@ -38,8 +38,9 @@ you use.
 ## Requirements
 
 - Python ≥ 3.10
-- A signed-in browser session on https://outlook.office.com to obtain a short-lived
-  bearer token (see [Getting a token](#getting-a-token))
+- A Microsoft 365 / Outlook account you can sign in to, for a short-lived bearer token.
+  `rwz-importer login` gets one for you via device-code sign-in; or copy one from the
+  browser (see [Getting a token](#getting-a-token))
 
 ## Install
 
@@ -74,6 +75,7 @@ parse  →  (review / edit JSON)  →  apply (dry-run)  →  apply --yes  →  v
 | `validate` | Compare the live mailbox against an expected JSON | Yes |
 | `report` | Render current folders + rules as Markdown/JSON | Yes |
 | `suggest` | Read recent mail (metadata only) and propose rules for unfiled patterns | Yes (read-only) |
+| `login` | Sign in with Microsoft (device code) and print a token | Yes (sign-in only) |
 | `token-help` | Print how to get a bearer token | No |
 
 ### 1. Parse (offline, always safe)
@@ -89,21 +91,49 @@ marked `[review]` in the table.
 
 ### 2. Getting a token
 
+**Easiest — sign in with Microsoft (device code):**
+
+```powershell
+rwz-importer login
+```
+
+It prints a short code and a URL (`https://microsoft.com/devicelogin`). Open the page,
+enter the code, and finish signing in as you normally would (MFA included). When it's
+done, the token is printed back along with a ready-to-paste line:
+
+```powershell
+$env:OWA_TOKEN = "<the printed token>"
+```
+
+No DevTools, no copy-hunting. The [web UI](#use-it-from-a-browser-local-web-ui) has a
+**Sign in with Microsoft** button that does the same thing and captures the token for you.
+
+By default this uses the first-party *Microsoft Office* public client, pre-consented in
+most tenants. If your organisation blocks device-code sign-in, or uses its own app
+registration, override with `--tenant` / `--client-id` (or `OWA_OAUTH_TENANT`,
+`OWA_OAUTH_CLIENT_ID`, `OWA_OAUTH_SCOPE`, `OWA_OAUTH_AUTHORITY`), or use the manual method
+below.
+
+**Manual fallback — copy from a signed-in browser tab:**
+
+Some organisations block device-code sign-in via Conditional Access (you'll see *"your
+sign-in … does not meet the criteria to access this resource"*). That's an admin policy,
+not a bug — so reuse the browser session your org already trusts:
+
 ```powershell
 rwz-importer token-help
 ```
 
-Follow the **Network tab** method it prints: sign in to outlook.office.com, open DevTools
-(F12) → Network, open a folder, find a request to `…/api/v2.0/me/…`, and copy the
-`authorization` header value after `Bearer `. Then:
+It prints a short **console snippet**: sign in to outlook.office.com, open DevTools
+(F12) → **Console**, paste the snippet, press Enter, and it copies your Outlook token to
+the clipboard. Then `$env:OWA_TOKEN = "<paste-token-here>"`. (The web UI's *Paste a token
+manually* section has a one-click **Copy console snippet** button for the same thing.) If
+the snippet finds nothing, fall back to copying the `authorization: Bearer …` header from
+any `…/api/v2.0/me/…` request in the **Network** tab.
 
-```powershell
-$env:OWA_TOKEN = "<paste-token-here>"
-```
-
-The token is read **only** from `--token` or `$OWA_TOKEN`. It is **never written to disk**
-by this tool. It expires after roughly an hour; re-extract if a run starts failing with
-401.
+Either way, the token is read **only** from `--token`, `$OWA_TOKEN`, or in-memory entry,
+and is **never written to disk** by this tool. It expires after roughly an hour; just sign
+in again if a run starts failing with 401.
 
 ### 3. Apply — dry-run first (the default)
 
@@ -187,9 +217,11 @@ rwz-importer web                 # serves http://127.0.0.1:8765
 
 Open the printed URL. The page has five parts, top to bottom:
 
-1. **Instructions** — what the tool does and the step-by-step for getting a token.
-2. **Setup** — paste your OWA token (and, optionally, a mailbox label). "Forget token"
-   clears it from memory.
+1. **Instructions** — what the tool does and the two ways to connect your mailbox.
+2. **Setup** — click **Sign in with Microsoft** to authenticate via device code (a code +
+   sign-in page open in a new tab; the token is captured automatically when you finish) —
+   no DevTools needed. A *Paste a token manually (advanced)* section is there if you'd
+   rather copy one from the Network tab. "Forget token" clears it from memory.
 3. **Inbox rules (CRUD)** — your server-side rules in order; add, edit, or delete them, with
    a folder picker that can create a new destination folder.
 4. **Run** — **Run** (per rule) or **Run all** files the mail *already sitting in your inbox*.
@@ -201,11 +233,14 @@ Open the printed URL. The page has five parts, top to bottom:
 
 **Security model.** The token is held **only in the server process's memory** (it can be
 seeded from `OWA_TOKEN`), is **never written to disk**, **never sent back to the browser**
-(the UI only learns whether one is set), and **never appears in a URL or log**. The server
-**binds to loopback only** — `rwz-importer web --host …` refuses any non-loopback address
-because the process holds your token. All the engine's safety guarantees (preview/dry-run
-first, delete only inside a confirmed REPLACE, never delete a folder, cross-mailbox addresses
-skipped unless explicitly remapped) apply here too. Deleting a rule asks for confirmation.
+(the UI only learns whether one is set), and **never appears in a URL or log**. During
+**Sign in with Microsoft**, the device-code exchange happens **server-side**: the browser
+only ever sees the short user code and the Microsoft sign-in URL — never the polling
+`device_code` or the resulting token. The server **binds to loopback only** —
+`rwz-importer web --host …` refuses any non-loopback address because the process holds your
+token. All the engine's safety guarantees (preview/dry-run first, delete only inside a
+confirmed REPLACE, never delete a folder, cross-mailbox addresses skipped unless explicitly
+remapped) apply here too. Deleting a rule asks for confirmation.
 
 ## Use it from an agent (MCP server)
 

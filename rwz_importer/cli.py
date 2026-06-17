@@ -1,4 +1,4 @@
-"""``click`` entry point: ``parse`` / ``apply`` / ``validate`` / ``report`` / ``token-help``.
+"""``click`` entry point: ``parse`` / ``apply`` / ``validate`` / ``report`` / ``login`` / ``token-help`` / ``web``.
 
 Design priorities are safety and transparency:
 
@@ -406,6 +406,52 @@ def token_help() -> None:
     click.echo(_TOKEN_HELP)
 
 
+# --------------------------------------------------------------------- login --
+@cli.command()
+@click.option("--tenant", default=None, help="AAD tenant (default: common, or $OWA_OAUTH_TENANT).")
+@click.option("--client-id", default=None, help="Override the OAuth client id ($OWA_OAUTH_CLIENT_ID).")
+@click.option("--export/--no-export", "show_export", default=True, show_default=True,
+              help="Also print a ready-to-paste OWA_TOKEN line.")
+def login(tenant: str | None, client_id: str | None, show_export: bool) -> None:
+    """Sign in with Microsoft (device code) and print an OWA token. Nothing is stored.
+
+    Opens no browser itself: it prints a short code and a URL, you sign in there as
+    usual (MFA included), and the token is printed when you're done. The token lives
+    only in your shell after you export it; this tool never writes it to disk.
+    """
+    from rwz_importer import auth
+
+    def prompt(info: dict) -> None:
+        url = info.get("verification_uri") or "https://microsoft.com/devicelogin"
+        click.echo("")
+        click.echo("To sign in, open this page in a browser:")
+        click.echo(f"    {url}")
+        click.echo(f"and enter the code:  {info.get('user_code', '')}")
+        click.echo("")
+        click.echo("Waiting for you to finish signing in...  (Ctrl+C to cancel)")
+
+    try:
+        token = auth.acquire_token(on_prompt=prompt, tenant=tenant, client_id=client_id)
+    except auth.AuthError as exc:
+        raise click.UsageError(
+            f"{exc}\n\nIf your organisation blocks device-code sign-in, use "
+            "`rwz-importer token-help` for the manual (Network tab) method."
+        ) from exc
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        raise click.Abort() from None
+
+    click.echo("")
+    click.echo("Signed in. OWA token (valid ~1 hour):")
+    click.echo("")
+    click.echo(token)
+    if show_export:
+        click.echo("")
+        click.echo("Use it with this tool — PowerShell:")
+        click.echo(f'    $env:OWA_TOKEN = "{token}"')
+        click.echo("bash / zsh:")
+        click.echo(f'    export OWA_TOKEN="{token}"')
+
+
 # --------------------------------------------------------------------- web --
 @cli.command()
 @click.option("--host", default="127.0.0.1", show_default=True, help="Bind host (loopback only).")
@@ -690,40 +736,64 @@ def _format_api_error(exc: OwaApiError) -> str:
 
 
 _TOKEN_HELP = """\
-Obtain an OWA bearer token from a signed-in browser session
-===========================================================
+Obtain an OWA bearer token
+==========================
 
 The token is read at runtime from --token or the OWA_TOKEN environment variable
 and is NEVER written to disk by this tool. Treat it like a password: it grants
 access to your mailbox and expires after about an hour.
 
-Recommended (Network tab)
--------------------------
-1. Sign in to https://outlook.office.com in your browser.
-2. Open DevTools (F12) -> Network tab.
-3. In the mailbox, open any folder so requests fire. Filter for "v2.0".
-4. Click a request to outlook.office.com/api/v2.0/me/... -> Headers.
-5. Under Request Headers copy the "authorization" value after "Bearer ".
+Easiest: sign in with Microsoft
+-------------------------------
+Run:
+    rwz-importer login
 
-Then provide it to the tool (PowerShell):
+It prints a short code and a URL; sign in there as usual (MFA included) and the
+token is printed back, ready to paste into OWA_TOKEN. No DevTools required.
+(The web UI has a "Sign in with Microsoft" button that does the same thing.)
+
+NOTE: some organisations block device-code sign-in via Conditional Access. If
+`login` fails with "your sign-in ... does not meet the criteria to access this
+resource", that's an admin policy, not a bug -- use the manual method below,
+which reuses the browser session your org already trusts.
+
+Manual: copy the token from a signed-in Outlook tab
+---------------------------------------------------
+1. Sign in to https://outlook.office.com and let the mailbox load.
+2. Open DevTools (F12) -> Console tab.
+3. Paste the snippet below and press Enter. It finds your Outlook token and
+   copies it to the clipboard. (If the console warns about pasting, type
+   "allow pasting" first.)
+
+    (() => {
+      const aud = (t) => { try { const p = (t.split(".")[1] || ""); return (JSON.parse(atob(p.replace(/-/g, "+").replace(/_/g, "/"))) || {}).aud || ""; } catch (e) { return ""; } };
+      const owa = (s) => { s = (s || "").toLowerCase(); return s.indexOf("outlook.office.com") >= 0 || s.indexOf("00000002-0000-0ff1-ce00-000000000000") >= 0; };
+      const hits = [];
+      const scan = (store) => {
+        for (let i = 0; i < store.length; i++) {
+          const raw = store.getItem(store.key(i));
+          if (!raw) continue;
+          let o = null; try { o = JSON.parse(raw); } catch (e) {}
+          if (o && o.credentialType === "AccessToken" && typeof o.secret === "string") {
+            if (owa(aud(o.secret)) || owa(o.target)) hits.push(o.secret);
+          } else if (raw.indexOf("eyJ") === 0 && owa(aud(raw))) {
+            hits.push(raw);
+          }
+        }
+      };
+      scan(localStorage); scan(sessionStorage);
+      if (!hits.length) { console.warn("No Outlook token found. Open outlook.office.com, let it load, then retry."); return; }
+      try { copy(hits[0]); console.log("Outlook token copied to clipboard."); } catch (e) {}
+      console.log(hits[0]);
+    })();
+
+4. Provide it to the tool (PowerShell):
     $env:OWA_TOKEN = "<paste-token-here>"
     rwz-importer apply --file rules.rwz --dry-run
 
-Quick console scan (alternative)
---------------------------------
-Paste this in the DevTools Console on outlook.office.com to list JWT-looking
-values in storage (copy the one for outlook.office.com):
-
-    (() => {
-      const out = [];
-      for (const store of [localStorage, sessionStorage]) {
-        for (let i = 0; i < store.length; i++) {
-          const k = store.key(i), v = store.getItem(k);
-          if (v && /eyJ[\\w-]+\\.[\\w-]+\\./.test(v)) out.push(k);
-        }
-      }
-      console.log(out.length ? out : "No JWT-like values found; use the Network tab.");
-    })();
+If the snippet finds nothing, fall back to the Network tab: open any request to
+outlook.office.com/api/v2.0/me/... and copy the "authorization" header value
+after "Bearer ".
 
 Never paste your token into a shared chat, ticket, or screenshot.
 """
