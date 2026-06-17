@@ -1,0 +1,595 @@
+"""``click`` entry point: ``parse`` / ``apply`` / ``validate`` / ``report`` / ``token-help``.
+
+Design priorities are safety and transparency:
+
+* **Dry-run is the default for ``apply``** — nothing is written without an explicit
+  ``--yes`` or an interactive confirmation. A non-interactive session without
+  ``--yes`` is downgraded to a dry-run rather than hanging on a prompt.
+* The **token is read from ``--token`` or ``$OWA_TOKEN`` only** and is never written
+  to disk or echoed back.
+* Existing rules are deleted **only** as part of a confirmed ``REPLACE``; folders are
+  never deleted. Addresses flagged as possibly cross-mailbox are never rewritten
+  silently — they are resolved interactively or skipped with a warning under ``--yes``.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import click
+
+from rwz_importer.api.owa_client import (
+    DEFAULT_BASE_URL,
+    ExistingRule,
+    Folder,
+    OwaApiError,
+    OwaClient,
+    normalize_folder_name,
+)
+from rwz_importer.engine import (
+    ActionKind,
+    ApplyPlan,
+    ConflictDecision,
+    Decision,
+    PlannedAction,
+    build_plan,
+    detect_conflicts,
+    validate_state,
+)
+from rwz_importer.logging_setup import setup_logging
+from rwz_importer.models import RuleSet
+from rwz_importer.parser import parse_rwz_file
+from rwz_importer.report.generator import generate_json_report, generate_markdown_report
+
+
+@click.group()
+@click.version_option(package_name="rwz-importer", message="%(version)s")
+def cli() -> None:
+    """Import Outlook Classic ``.rwz`` rules into a New Outlook / OWA mailbox."""
+
+
+# --------------------------------------------------------------------- parse --
+@cli.command()
+@click.option(
+    "--file",
+    "rwz_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to the .rwz rule export.",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the parsed rules to this JSON file (otherwise stdout only).",
+)
+@click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
+def parse(rwz_file: Path, output: Path | None, verbose: bool) -> None:
+    """Parse a ``.rwz`` file into rules JSON. Offline and always safe."""
+    setup_logging(verbose=verbose)
+    ruleset = parse_rwz_file(rwz_file)
+    _print_rule_summary(ruleset)
+
+    if output:
+        output.write_text(ruleset.to_json(), encoding="utf-8")
+        click.echo(f"\nWrote {len(ruleset.rules)} rules to {output}")
+    else:
+        click.echo("\n(Pass --output to save this as editable JSON.)")
+
+
+# --------------------------------------------------------------------- apply --
+@cli.command()
+@click.option(
+    "--file",
+    "rwz_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Parse rules from this .rwz file.",
+)
+@click.option(
+    "--from-json",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Load rules from a previously parsed (and possibly edited) JSON file.",
+)
+@click.option(
+    "--token",
+    envvar="OWA_TOKEN",
+    default=None,
+    help="OWA bearer token. Read from $OWA_TOKEN if omitted. Never stored.",
+)
+@click.option("--mailbox", default=None, help="Target mailbox address (for reporting only).")
+@click.option(
+    "--exclude-rule",
+    "exclude_rules",
+    multiple=True,
+    metavar="NAME",
+    help="Drop a rule by name (repeatable).",
+)
+@click.option(
+    "--map-address",
+    "map_addresses",
+    multiple=True,
+    metavar="OLD=NEW",
+    help="Rewrite a from-address (repeatable).",
+)
+@click.option(
+    "--normalize-folders/--no-normalize-folders",
+    default=True,
+    help="Map Unicode punctuation in folder names to ASCII when creating folders.",
+)
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    help="Preview only (default). Use --no-dry-run (or --yes) to write changes.",
+)
+@click.option("--yes", is_flag=True, help="Apply non-interactively (implies --no-dry-run).")
+@click.option("--base-url", default=DEFAULT_BASE_URL, help="Override the OWA API base URL.")
+@click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
+@click.option(
+    "--logfile",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Mirror logs to this file for an audit trail.",
+)
+def apply(
+    rwz_file: Path | None,
+    from_json: Path | None,
+    token: str | None,
+    mailbox: str | None,
+    exclude_rules: tuple[str, ...],
+    map_addresses: tuple[str, ...],
+    normalize_folders: bool,
+    dry_run: bool,
+    yes: bool,
+    base_url: str,
+    verbose: bool,
+    logfile: Path | None,
+) -> None:
+    """Parse/load rules, show a plan, and (with --yes / confirmation) apply it."""
+    setup_logging(verbose=verbose, logfile=logfile)
+
+    if bool(rwz_file) == bool(from_json):
+        raise click.UsageError("Pass exactly one of --file or --from-json.")
+
+    ruleset = parse_rwz_file(rwz_file) if rwz_file else _load_json(from_json)
+    address_map = _parse_address_map(map_addresses)
+    excludes = set(exclude_rules)
+
+    # --yes means the user wants to write; never silently honour it as a no-op.
+    if yes:
+        dry_run = False
+    interactive = sys.stdin.isatty()
+
+    # Decide whether we will reach the server at all.
+    if not token:
+        if not dry_run:
+            raise click.UsageError(
+                "apply needs a token to write changes. Pass --token or set "
+                "OWA_TOKEN, or run with --dry-run for an offline preview."
+            )
+        _offline_preview(ruleset, excludes, address_map, normalize_folders)
+        return
+
+    try:
+        with OwaClient(token, base_url=base_url) as client:
+            existing_rules = client.list_rules()
+            folders = _all_folders(client)
+            folder_names = _folder_name_set(folders)
+
+            decisions = detect_conflicts(ruleset.rules, existing_rules, folder_names)
+            base_sequence = _next_sequence(existing_rules)
+            plan = build_plan(
+                decisions,
+                excludes=excludes,
+                address_map=address_map,
+                normalize_folders=normalize_folders,
+                base_sequence=base_sequence,
+            )
+            _print_plan(plan, existing_rules=existing_rules, mailbox=mailbox)
+
+            if dry_run:
+                click.echo("\nDry-run: no changes made. Re-run with --yes to apply.")
+                return
+
+            if not yes:
+                if not interactive:
+                    click.echo(
+                        "\nNon-interactive session without --yes; staying in dry-run."
+                    )
+                    return
+                if not click.confirm("\nApply these changes to the mailbox?", default=False):
+                    click.echo("Aborted; no changes made.")
+                    return
+
+            _resolve_flagged_actions(plan, interactive=interactive, assume_yes=yes)
+            _execute_plan(client, plan, folders)
+
+            # Post-apply validation against what we intended to create.
+            live_rules = client.list_rules()
+            result = validate_state(live_rules, ruleset)
+            click.echo("\n" + result.summary)
+            for status in result.statuses:
+                mark = "OK  " if status.ok else "FAIL"
+                click.echo(f"  [{mark}] {status.name}: {status.detail}")
+    except OwaApiError as exc:
+        raise click.ClickException(_format_api_error(exc)) from exc
+
+
+# ------------------------------------------------------------------ validate --
+@cli.command()
+@click.option("--token", envvar="OWA_TOKEN", default=None, help="OWA bearer token.")
+@click.option(
+    "--expected",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default="rules.json",
+    show_default=True,
+    help="Parsed rules JSON to validate the live mailbox against.",
+)
+@click.option("--mailbox", default=None, help="Target mailbox address (for reporting only).")
+@click.option("--base-url", default=DEFAULT_BASE_URL, help="Override the OWA API base URL.")
+@click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
+def validate(
+    token: str | None, expected: Path, mailbox: str | None, base_url: str, verbose: bool
+) -> None:
+    """Compare the live mailbox rules against an expected rules JSON."""
+    setup_logging(verbose=verbose)
+    if not token:
+        raise click.UsageError("validate needs a token. Pass --token or set OWA_TOKEN.")
+
+    ruleset = _load_json(expected)
+    try:
+        with OwaClient(token, base_url=base_url) as client:
+            live_rules = client.list_rules()
+    except OwaApiError as exc:
+        raise click.ClickException(_format_api_error(exc)) from exc
+
+    result = validate_state(live_rules, ruleset)
+    click.echo(result.summary)
+    for status in result.statuses:
+        mark = "OK  " if status.ok else "FAIL"
+        click.echo(f"  [{mark}] {status.name}: {status.detail}")
+    if result.extra_rules:
+        click.echo("\nUnexpected rules on server: " + ", ".join(result.extra_rules))
+    if not result.ok:
+        sys.exit(1)
+
+
+# -------------------------------------------------------------------- report --
+@cli.command()
+@click.option("--token", envvar="OWA_TOKEN", default=None, help="OWA bearer token.")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["markdown", "json"]),
+    default="markdown",
+    show_default=True,
+    help="Report format.",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the report here (otherwise stdout).",
+)
+@click.option("--mailbox", default=None, help="Target mailbox address (for reporting only).")
+@click.option("--base-url", default=DEFAULT_BASE_URL, help="Override the OWA API base URL.")
+@click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
+def report(
+    token: str | None,
+    fmt: str,
+    output: Path | None,
+    mailbox: str | None,
+    base_url: str,
+    verbose: bool,
+) -> None:
+    """Fetch the live mailbox state and render it as Markdown or JSON."""
+    setup_logging(verbose=verbose)
+    if not token:
+        raise click.UsageError("report needs a token. Pass --token or set OWA_TOKEN.")
+
+    try:
+        with OwaClient(token, base_url=base_url) as client:
+            rules = client.list_rules()
+            folders = _all_folders(client)
+    except OwaApiError as exc:
+        raise click.ClickException(_format_api_error(exc)) from exc
+
+    if fmt == "json":
+        text = generate_json_report(rules, folders, mailbox=mailbox)
+    else:
+        text = generate_markdown_report(rules, folders, mailbox=mailbox)
+
+    if output:
+        output.write_text(text, encoding="utf-8")
+        click.echo(f"Wrote {fmt} report to {output}")
+    else:
+        click.echo(text)
+
+
+# ---------------------------------------------------------------- token-help --
+@cli.command(name="token-help")
+def token_help() -> None:
+    """Print how to obtain an OWA bearer token from a signed-in browser session."""
+    click.echo(_TOKEN_HELP)
+
+
+# --------------------------------------------------------------------- helpers --
+def _load_json(path: Path) -> RuleSet:
+    return RuleSet.from_json(path.read_text(encoding="utf-8"))
+
+
+def _parse_address_map(pairs: tuple[str, ...]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise click.UsageError(f"--map-address expects OLD=NEW, got {pair!r}.")
+        old, new = pair.split("=", 1)
+        old, new = old.strip(), new.strip()
+        if not old or not new:
+            raise click.UsageError(f"--map-address expects OLD=NEW, got {pair!r}.")
+        mapping[old] = new
+    return mapping
+
+
+def _all_folders(client: OwaClient) -> list[Folder]:
+    """Inbox child folders plus top-level folders, de-duplicated by id."""
+    seen: dict[str, Folder] = {}
+    for folder in client.list_inbox_folders() + client.list_all_folders():
+        if folder.id and folder.id not in seen:
+            seen[folder.id] = folder
+    return list(seen.values())
+
+
+def _folder_name_set(folders: list[Folder]) -> set[str]:
+    return {f.display_name.strip().lower() for f in folders if f.display_name}
+
+
+def _next_sequence(existing_rules: list[ExistingRule]) -> int:
+    seqs = [r.sequence for r in existing_rules if r.sequence is not None]
+    return max(seqs) + 1 if seqs else 1
+
+
+def _print_rule_summary(ruleset: RuleSet) -> None:
+    click.echo(f"Parsed {len(ruleset.rules)} rules from {ruleset.source_file or '?'}")
+    if ruleset.source_mailbox:
+        click.echo(f"Source mailbox: {ruleset.source_mailbox}")
+    click.echo("")
+    header = f"{'Seq':>3}  {'Rule':<32}  {'Move to':<22}  Conditions"
+    click.echo(header)
+    click.echo("-" * len(header))
+    for rule in ruleset.rules:
+        seq = rule.sequence if rule.sequence is not None else "-"
+        dest = rule.actions.moveToFolder or "-"
+        flag = "  [review]" if rule.flags.addressMayBelongToDifferentMailbox else ""
+        click.echo(
+            f"{seq:>3}  {_clip(rule.name, 32):<32}  {_clip(dest, 22):<22}  "
+            f"{_conditions_text(rule)}{flag}"
+        )
+
+
+def _conditions_text(rule) -> str:
+    parts: list[str] = []
+    if rule.conditions.fromAddresses:
+        parts.append("from " + ", ".join(rule.conditions.fromAddresses))
+    if rule.conditions.subjectContains:
+        parts.append("subject " + ", ".join(rule.conditions.subjectContains))
+    if rule.conditions.senderContains:
+        parts.append("sender " + ", ".join(rule.conditions.senderContains))
+    return "; ".join(parts) if parts else "(none)"
+
+
+def _print_plan(
+    plan: ApplyPlan, *, existing_rules: list[ExistingRule], mailbox: str | None
+) -> None:
+    if mailbox:
+        click.echo(f"Mailbox: {mailbox}")
+    click.echo(f"Existing rules on server: {len(existing_rules)}")
+    click.echo("")
+
+    folders = plan.folder_creations
+    if folders:
+        click.echo("Folders to create:")
+        for action in folders:
+            extra = ""
+            if action.folder_create_name and action.folder_create_name != action.folder_display:
+                extra = f" (as {action.folder_create_name!r})"
+            click.echo(f"  + {action.folder_display}{extra}")
+        click.echo("")
+
+    click.echo("Rules:")
+    for action in plan.actions:
+        if action.kind is ActionKind.CREATE_FOLDER:
+            continue
+        verb = {
+            ActionKind.CREATE_RULE: "CREATE ",
+            ActionKind.REPLACE_RULE: "REPLACE",
+            ActionKind.SKIP_RULE: "SKIP   ",
+        }[action.kind]
+        name = action.rule.name if action.rule else "?"
+        seq = f"seq {action.sequence}" if action.sequence is not None else ""
+        review = "  [needs review: cross-mailbox address]" if action.needs_review else ""
+        click.echo(f"  {verb}  {_clip(name, 36):<36} {seq:<8} {action.reason}{review}")
+
+
+def _resolve_flagged_actions(
+    plan: ApplyPlan, *, interactive: bool, assume_yes: bool
+) -> None:
+    """Resolve cross-mailbox-flagged rules before writing.
+
+    Under ``--yes`` flagged rules are converted to skips (never rewritten silently).
+    Interactively the user chooses skip / keep / remap per rule.
+    """
+    for action in plan.actions:
+        if not action.needs_review or action.rule is None:
+            continue
+        rule = action.rule
+        addrs = ", ".join(rule.conditions.fromAddresses) or "(none)"
+
+        if assume_yes or not interactive:
+            action.kind = ActionKind.SKIP_RULE
+            action.needs_review = False
+            action.reason = "Skipped: unresolved cross-mailbox address (use --map-address)."
+            click.echo(f"  ! Skipping {rule.name!r}: cross-mailbox address {addrs}")
+            continue
+
+        click.echo(
+            f"\nRule {rule.name!r} has an address that may belong to a different "
+            f"mailbox: {addrs}"
+        )
+        choice = click.prompt(
+            "  [s]kip / [k]eep as-is / [r]emap address", default="s"
+        ).strip().lower()
+        if choice.startswith("r"):
+            old = click.prompt("    address to replace").strip()
+            new = click.prompt("    replacement address").strip()
+            rule.conditions.fromAddresses = [
+                new if a.strip().lower() == old.lower() else a
+                for a in rule.conditions.fromAddresses
+            ]
+            rule.flags.addressMayBelongToDifferentMailbox = False
+            action.needs_review = False
+        elif choice.startswith("k"):
+            rule.flags.addressMayBelongToDifferentMailbox = False
+            action.needs_review = False
+        else:
+            action.kind = ActionKind.SKIP_RULE
+            action.needs_review = False
+            action.reason = "Skipped by user (cross-mailbox address)."
+
+
+def _execute_plan(client: OwaClient, plan: ApplyPlan, existing_folders: list[Folder]) -> None:
+    """Create folders, then create/replace rules. Deletes only inside a REPLACE."""
+    folder_ids: dict[str, str] = {}
+    for folder in existing_folders:
+        if folder.display_name:
+            folder_ids[folder.display_name.strip().lower()] = folder.id
+            folder_ids[normalize_folder_name(folder.display_name).strip().lower()] = folder.id
+
+    for action in plan.folder_creations:
+        name = action.folder_create_name or action.folder_display or ""
+        created = client.create_folder(name)
+        click.echo(f"  created folder {created.display_name!r}")
+        folder_ids[created.display_name.strip().lower()] = created.id
+        if action.folder_display:
+            folder_ids[action.folder_display.strip().lower()] = created.id
+
+    created_rules = 0
+    for action in plan.actions:
+        if action.kind not in (ActionKind.CREATE_RULE, ActionKind.REPLACE_RULE):
+            continue
+        rule = action.rule
+        assert rule is not None
+        folder_id = _resolve_folder_id(action.folder_display, folder_ids)
+
+        if action.kind is ActionKind.REPLACE_RULE and action.existing_rule_id:
+            client.delete_rule(action.existing_rule_id)
+            click.echo(f"  replaced (deleted old) {rule.name!r}")
+
+        client.create_rule(
+            display_name=rule.name,
+            sequence=action.sequence or 1,
+            folder_id=folder_id,
+            from_addresses=rule.conditions.fromAddresses or None,
+            subject_contains=rule.conditions.subjectContains or None,
+            sender_contains=rule.conditions.senderContains or None,
+            stop_processing=rule.actions.stopProcessingRules,
+            enabled=rule.enabled,
+        )
+        created_rules += 1
+        click.echo(f"  created rule {rule.name!r} (seq {action.sequence})")
+
+    click.echo(f"\nApplied: {len(plan.folder_creations)} folders, {created_rules} rules.")
+
+
+def _resolve_folder_id(display: str | None, folder_ids: dict[str, str]) -> str | None:
+    if not display:
+        return None
+    for key in (display.strip().lower(), normalize_folder_name(display).strip().lower()):
+        if key in folder_ids:
+            return folder_ids[key]
+    return None
+
+
+def _offline_preview(
+    ruleset: RuleSet,
+    excludes: set[str],
+    address_map: dict[str, str],
+    normalize_folders: bool,
+) -> None:
+    """Show what would happen with no server state (every rule treated as new)."""
+    click.echo("Offline preview (no token): server state is unknown.\n")
+    decisions = [
+        ConflictDecision(
+            rule, Decision.CREATE, "Offline preview (server state unknown).", folder_missing=True
+        )
+        for rule in ruleset.rules
+    ]
+    plan = build_plan(
+        decisions,
+        excludes=excludes,
+        address_map=address_map,
+        normalize_folders=normalize_folders,
+    )
+    _print_plan(plan, existing_rules=[], mailbox=ruleset.source_mailbox)
+    click.echo("\nProvide --token (or set OWA_TOKEN) to detect conflicts and apply.")
+
+
+def _clip(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _format_api_error(exc: OwaApiError) -> str:
+    msg = str(exc)
+    if exc.status in (401, 403):
+        msg += (
+            "\nThe token was rejected. It may be expired (OWA tokens last ~1h) or "
+            "scoped for graph.microsoft.com instead of outlook.office.com. "
+            "Run `rwz-importer token-help` for how to get a fresh one."
+        )
+    return msg
+
+
+_TOKEN_HELP = """\
+Obtain an OWA bearer token from a signed-in browser session
+===========================================================
+
+The token is read at runtime from --token or the OWA_TOKEN environment variable
+and is NEVER written to disk by this tool. Treat it like a password: it grants
+access to your mailbox and expires after about an hour.
+
+Recommended (Network tab)
+-------------------------
+1. Sign in to https://outlook.office.com in your browser.
+2. Open DevTools (F12) -> Network tab.
+3. In the mailbox, open any folder so requests fire. Filter for "v2.0".
+4. Click a request to outlook.office.com/api/v2.0/me/... -> Headers.
+5. Under Request Headers copy the "authorization" value after "Bearer ".
+
+Then provide it to the tool (PowerShell):
+    $env:OWA_TOKEN = "<paste-token-here>"
+    rwz-importer apply --file rules.rwz --dry-run
+
+Quick console scan (alternative)
+--------------------------------
+Paste this in the DevTools Console on outlook.office.com to list JWT-looking
+values in storage (copy the one for outlook.office.com):
+
+    (() => {
+      const out = [];
+      for (const store of [localStorage, sessionStorage]) {
+        for (let i = 0; i < store.length; i++) {
+          const k = store.key(i), v = store.getItem(k);
+          if (v && /eyJ[\\w-]+\\.[\\w-]+\\./.test(v)) out.push(k);
+        }
+      }
+      console.log(out.length ? out : "No JWT-like values found; use the Network tab.");
+    })();
+
+Never paste your token into a shared chat, ticket, or screenshot.
+"""
+
+
+if __name__ == "__main__":  # pragma: no cover
+    cli()

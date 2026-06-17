@@ -1,0 +1,284 @@
+{
+  "source_file": "sample_rules.rwz",
+  "source_mailbox": "alice.sample@example.com",
+  "extracted_at": "2026-06-17T00:00:00Z",
+  "rules": [
+    {
+      "name": "Meeting Invites",
+      "sequence": 1,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [],
+        "subjectContains": [
+          "Accepted:",
+          "Tentative:",
+          "Aceite:"
+        ],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Meeting Invites",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "SI HelpDesk",
+      "sequence": 2,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "helpdesk@example.com"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "SI HelpDesk",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "Confluence",
+      "sequence": 3,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "confluence-noreply@example.com"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Confluence",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "Email LabOps",
+      "sequence": 4,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "alice.sample@example.org"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Email LabOps",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": true,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "ACMESUP",
+      "sequence": 5,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [],
+        "subjectContains": [
+          "Acmepharm",
+          "ACMEPHA"
+        ],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "ACMESUP",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "PRJX",
+      "sequence": 6,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [],
+        "subjectContains": [
+          "PRJX"
+        ],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "PRJX – Project Phoenix",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "org daily stuff",
+      "sequence": 7,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "noreply@social.example.com"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Org News",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "Bitbucket",
+      "sequence": 8,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "bitbucket-noreply@example.com"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Bitbucket",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "Report",
+      "sequence": 9,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "report-mail@example.com"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Report",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "Sharepoint",
+      "sequence": 10,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "no-reply@docs.example.com"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Sharepoint",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "Training",
+      "sequence": 11,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "training@example.com"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Training",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "Teams",
+      "sequence": 12,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "no-reply@chat.example.com"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Teams",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    },
+    {
+      "name": "Weekly Digest & Viva Engage",
+      "sequence": 13,
+      "enabled": true,
+      "exclude": false,
+      "conditions": {
+        "fromAddresses": [
+          "digest-noreply@engage.mail.invalid",
+          "digest-notify@engage.mail.invalid"
+        ],
+        "subjectContains": [],
+        "senderContains": []
+      },
+      "actions": {
+        "moveToFolder": "Weekly Digest",
+        "stopProcessingRules": true
+      },
+      "flags": {
+        "addressMayBelongToDifferentMailbox": false,
+        "unsupportedConditions": []
+      }
+    }
+  ]
+}
