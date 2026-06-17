@@ -14,6 +14,7 @@ Design priorities are safety and transparency:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -33,8 +34,10 @@ from rwz_importer.engine import (
     ConflictDecision,
     Decision,
     PlannedAction,
+    RuleSuggestion,
     build_plan,
     detect_conflicts,
+    suggest_rules,
     validate_state,
 )
 from rwz_importer.logging_setup import setup_logging
@@ -308,6 +311,94 @@ def report(
         click.echo(text)
 
 
+# ------------------------------------------------------------------- suggest --
+@cli.command()
+@click.option("--token", envvar="OWA_TOKEN", default=None, help="OWA bearer token.")
+@click.option("--folder", default="Inbox", show_default=True, help="Folder to sample.")
+@click.option(
+    "--top",
+    default=300,
+    show_default=True,
+    help="How many recent messages to read (metadata only).",
+)
+@click.option("--min-sender", default=3, show_default=True, help="Min messages for a sender rule.")
+@click.option("--min-domain", default=6, show_default=True, help="Min messages for a domain rule.")
+@click.option(
+    "--min-subject", default=4, show_default=True, help="Min messages for a subject-tag rule."
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    help="Output format (json is agent-friendly).",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write suggestions here (otherwise stdout).",
+)
+@click.option("--base-url", default=DEFAULT_BASE_URL, help="Override the OWA API base URL.")
+@click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
+def suggest(
+    token: str | None,
+    folder: str,
+    top: int,
+    min_sender: int,
+    min_domain: int,
+    min_subject: int,
+    fmt: str,
+    output: Path | None,
+    base_url: str,
+    verbose: bool,
+) -> None:
+    """Read recent mail and propose rules for unfiled patterns. Read-only.
+
+    Reads message metadata only (sender, subject, date — never bodies), compares
+    against the rules already in place, and prints suggested rules. Nothing is
+    applied: feed an accepted suggestion back through `apply --from-json`.
+    """
+    setup_logging(verbose=verbose)
+    if not token:
+        raise click.UsageError("suggest needs a token. Pass --token or set OWA_TOKEN.")
+
+    try:
+        with OwaClient(token, base_url=base_url) as client:
+            messages = client.list_messages(folder=folder, top=top)
+            existing = client.list_rules()
+    except OwaApiError as exc:
+        raise click.ClickException(_format_api_error(exc)) from exc
+
+    suggestions = suggest_rules(
+        messages,
+        existing,
+        min_sender=min_sender,
+        min_domain=min_domain,
+        min_subject=min_subject,
+    )
+
+    if fmt == "json":
+        text = json.dumps(
+            {
+                "folder": folder,
+                "sampled_messages": len(messages),
+                "suggestions": [s.to_dict() for s in suggestions],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    else:
+        text = _render_suggestions(suggestions, sampled=len(messages), folder=folder)
+
+    if output:
+        output.write_text(text, encoding="utf-8")
+        click.echo(f"Wrote {len(suggestions)} suggestions to {output}")
+    else:
+        click.echo(text)
+
+
 # ---------------------------------------------------------------- token-help --
 @cli.command(name="token-help")
 def token_help() -> None:
@@ -370,13 +461,17 @@ def _print_rule_summary(ruleset: RuleSet) -> None:
 
 
 def _conditions_text(rule) -> str:
+    return _condition_text(rule.conditions)
+
+
+def _condition_text(cond) -> str:
     parts: list[str] = []
-    if rule.conditions.fromAddresses:
-        parts.append("from " + ", ".join(rule.conditions.fromAddresses))
-    if rule.conditions.subjectContains:
-        parts.append("subject " + ", ".join(rule.conditions.subjectContains))
-    if rule.conditions.senderContains:
-        parts.append("sender " + ", ".join(rule.conditions.senderContains))
+    if cond.fromAddresses:
+        parts.append("from " + ", ".join(cond.fromAddresses))
+    if cond.subjectContains:
+        parts.append("subject " + ", ".join(cond.subjectContains))
+    if cond.senderContains:
+        parts.append("sender " + ", ".join(cond.senderContains))
     return "; ".join(parts) if parts else "(none)"
 
 
@@ -534,6 +629,29 @@ def _offline_preview(
     )
     _print_plan(plan, existing_rules=[], mailbox=ruleset.source_mailbox)
     click.echo("\nProvide --token (or set OWA_TOKEN) to detect conflicts and apply.")
+
+
+def _render_suggestions(
+    suggestions: list[RuleSuggestion], *, sampled: int, folder: str
+) -> str:
+    lines = [
+        f"Sampled {sampled} messages from {folder} (metadata only).",
+        f"{len(suggestions)} suggestion(s):",
+        "",
+    ]
+    if not suggestions:
+        lines.append("No unfiled patterns found above the current thresholds.")
+        return "\n".join(lines)
+    for i, s in enumerate(suggestions, 1):
+        lines.append(f"{i}. {s.name}   (x{s.message_count}, confidence {s.confidence:.2f})")
+        lines.append(f"     match:   {_condition_text(s.condition)}")
+        lines.append(f"     move to: {s.suggested_folder}")
+        lines.append(f"     why:     {s.reason}")
+        if s.examples:
+            lines.append(f"     e.g.:    {s.examples[0]}")
+        lines.append("")
+    lines.append("These are advisory. Apply accepted ones via `apply --from-json`.")
+    return "\n".join(lines)
 
 
 def _clip(text: str, width: int) -> str:

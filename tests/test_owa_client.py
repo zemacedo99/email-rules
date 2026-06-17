@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from rwz_importer.api.owa_client import OwaClient
+from rwz_importer.api.provider import MailboxProvider
 
 
 def _client(handler, **kwargs) -> OwaClient:
@@ -101,3 +102,59 @@ def test_retry_on_429() -> None:
     assert rules == []
     assert state["n"] == 2
     assert slept == [0.0]
+
+
+def test_list_messages_parses_sender() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "messages" in str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {
+                        "Id": "1",
+                        "Subject": "Hi",
+                        "Sender": {"EmailAddress": {"Name": "Bob", "Address": "bob@x.com"}},
+                        "ReceivedDateTime": "2026-01-01T00:00:00Z",
+                    }
+                ]
+            },
+        )
+
+    with _client(handler) as client:
+        messages = client.list_messages(top=10)
+
+    assert len(messages) == 1
+    assert messages[0].sender_address == "bob@x.com"
+    assert messages[0].sender_name == "Bob"
+    assert messages[0].subject == "Hi"
+
+
+def test_list_messages_capped() -> None:
+    """Every page returns one item and a nextLink; the cap must stop the walk."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {"Id": "x", "Subject": "s", "Sender": {"EmailAddress": {"Address": "a@b.com"}}}
+                ],
+                "@odata.nextLink": (
+                    "https://outlook.office.com/api/v2.0/me/MailFolders/Inbox/messages?$skip=1"
+                ),
+            },
+        )
+
+    with _client(handler) as client:
+        messages = client.list_messages(top=3)
+
+    assert len(messages) == 3
+
+
+def test_owaclient_satisfies_provider() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": []})
+
+    with _client(handler) as client:
+        assert isinstance(client, MailboxProvider)

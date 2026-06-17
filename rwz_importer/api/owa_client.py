@@ -79,6 +79,32 @@ class Folder:
     display_name: str
 
 
+@dataclass
+class Message:
+    """An inbox message — **metadata only**. Bodies are never requested.
+
+    Only the fields needed to spot filing patterns (who sent it, the subject, and
+    when) are selected, so reading a sample of mail stays cheap and low-exposure.
+    """
+
+    id: str
+    subject: str
+    sender_address: str
+    sender_name: str = ""
+    received: str | None = None
+
+    @classmethod
+    def from_api(cls, d: dict) -> "Message":
+        envelope = (d.get("Sender") or d.get("From") or {}).get("EmailAddress") or {}
+        return cls(
+            id=d.get("Id", ""),
+            subject=(d.get("Subject") or "").strip(),
+            sender_address=(envelope.get("Address") or "").strip(),
+            sender_name=envelope.get("Name", "") or "",
+            received=d.get("ReceivedDateTime"),
+        )
+
+
 def normalize_folder_name(name: str) -> str:
     """Map Unicode punctuation Exchange dislikes to ASCII (en/em dash -> hyphen)."""
     if not name:
@@ -156,6 +182,17 @@ class OwaClient:
             next_url = payload.get("@odata.nextLink")
         return items
 
+    def _get_paged_capped(self, url: str, limit: int) -> list[dict]:
+        """Like :meth:`_get_paged` but stops once ``limit`` items are collected."""
+        items: list[dict] = []
+        next_url: str | None = url
+        while next_url and len(items) < limit:
+            response = self._request("GET", next_url)
+            payload = response.json()
+            items.extend(payload.get("value", []))
+            next_url = payload.get("@odata.nextLink")
+        return items[:limit]
+
     # -------------------------------------------------------------- Folders --
     def list_inbox_folders(self) -> list[Folder]:
         items = self._get_paged("MailFolders/Inbox/childfolders?$top=100")
@@ -230,6 +267,23 @@ class OwaClient:
     def delete_rule(self, rule_id: str) -> None:
         """Delete a message rule by id (expects HTTP 204)."""
         self._request("DELETE", f"MailFolders/Inbox/MessageRules/{rule_id}")
+
+    # ------------------------------------------------------------- Messages --
+    def list_messages(self, *, folder: str = "Inbox", top: int = 200) -> list[Message]:
+        """Read recent message metadata from ``folder`` (default Inbox).
+
+        Selects only ``Sender``/``Subject``/``ReceivedDateTime`` — message bodies are
+        never fetched. ``folder`` is a well-known name (``Inbox``, ``SentItems``,
+        ...) or a folder id; ``top`` caps how many messages are read.
+        """
+        page = min(max(top, 1), 100)
+        select = "Id,Subject,Sender,ReceivedDateTime"
+        url = (
+            f"MailFolders/{folder}/messages"
+            f"?$top={page}&$select={select}&$orderby=ReceivedDateTime%20desc"
+        )
+        items = self._get_paged_capped(url, top)
+        return [Message.from_api(i) for i in items]
 
 
 def _retry_after_seconds(response: httpx.Response, *, default: float) -> float:
