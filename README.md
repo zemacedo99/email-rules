@@ -1,8 +1,10 @@
-# rwz-importer
+# Email Rule Manager
 
 Parse Outlook **Classic** `.rwz` rule exports and recreate them as **server-side
 Exchange inbox rules** in **New Outlook / Outlook on the web**, via the OWA REST API
 (`https://outlook.office.com/api/v2.0/me/`).
+
+_Installed as the `rwz-importer` command (CLI, local web UI, and MCP server)._
 
 ## Why this exists
 

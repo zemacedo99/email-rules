@@ -17,7 +17,7 @@ pytest.importorskip("multipart")  # python-multipart, for the upload endpoint
 from starlette.testclient import TestClient  # noqa: E402
 
 from rwz_importer.api.owa_client import ExistingRule, Folder, Message  # noqa: E402
-from rwz_importer.web.app import create_app  # noqa: E402
+from rwz_importer.web.app import _SAMPLE_ALL, _sample_top, create_app  # noqa: E402
 from tests.test_service import FakeMailbox  # noqa: E402
 
 
@@ -35,7 +35,7 @@ def client(fake: FakeMailbox) -> TestClient:
 def test_index_is_served(client: TestClient) -> None:
     res = client.get("/")
     assert res.status_code == 200
-    assert "rwz-importer" in res.text
+    assert "Email Rule Manager" in res.text
     assert "Sign in with Microsoft" in res.text  # the easy sign-in path rendered
 
 
@@ -185,6 +185,26 @@ def test_suggest_endpoint(monkeypatch) -> None:
         s["rule"]["conditions"]["fromAddresses"] == ["news@shop.com"]
         for s in out["suggestions"]
     )
+
+
+def test_sample_top_maps_all_and_nonpositive_to_a_large_cap() -> None:
+    assert _sample_top("all") == _SAMPLE_ALL
+    assert _sample_top("ALL") == _SAMPLE_ALL  # case-insensitive
+    assert _sample_top(0) == _SAMPLE_ALL      # 0 means "everything"
+    assert _sample_top(-5) == _SAMPLE_ALL
+    assert _sample_top(None) == 300           # absent → default
+    assert _sample_top("garbage") == 300      # unparseable → default
+    assert _sample_top(50) == 50              # a real cap is kept
+
+
+def test_suggest_endpoint_accepts_all(fake: FakeMailbox) -> None:
+    fake._messages = [
+        Message(id=f"m{i}", subject="Deal", sender_address="news@shop.com")
+        for i in range(5)
+    ]
+    client = TestClient(create_app(lambda: fake))
+    out = client.post("/api/suggest", json={"top": "all", "min_sender": 3}).json()
+    assert out["sampled_messages"] == 5  # "all" drains the (small) fake inbox
 
 
 def test_rwz_upload_parses_and_plans(client: TestClient, rwz_path) -> None:

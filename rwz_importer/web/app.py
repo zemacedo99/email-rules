@@ -252,7 +252,7 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
                 return service.suggest(
                     client,
                     folder=body.get("folder", "Inbox"),
-                    top=int(body.get("top", 300)),
+                    top=_sample_top(body.get("top")),
                     min_sender=int(body.get("min_sender", 3)),
                     min_domain=int(body.get("min_domain", 6)),
                     min_subject=int(body.get("min_subject", 4)),
@@ -365,6 +365,25 @@ async def _body(request: Request) -> dict:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+# Sampling "all" of a mailbox is just a very high cap: the OWA client paginates
+# until ``@odata.nextLink`` is exhausted or the cap is hit, so this drains any
+# normal inbox while staying bounded for a pathological one.
+_SAMPLE_ALL = 100_000
+
+
+def _sample_top(value: object, default: int = 300) -> int:
+    """Map a request's ``top`` to a positive cap. ``"all"``/``0``/``None`` → all."""
+    if value is None:
+        return default
+    if isinstance(value, str) and value.strip().lower() == "all":
+        return _SAMPLE_ALL
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return _SAMPLE_ALL if n <= 0 else n
 
 
 def _parse_rwz_bytes(data: bytes, filename: str) -> dict:

@@ -49,7 +49,7 @@ from rwz_importer.report.generator import generate_json_report, generate_markdow
 @click.group()
 @click.version_option(package_name="rwz-importer", message="%(version)s")
 def cli() -> None:
-    """Import Outlook Classic ``.rwz`` rules into a New Outlook / OWA mailbox."""
+    """Email Rule Manager - import Outlook Classic ``.rwz`` rules into a New Outlook / OWA mailbox."""
 
 
 # --------------------------------------------------------------------- parse --
