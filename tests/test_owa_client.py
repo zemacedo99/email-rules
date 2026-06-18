@@ -35,6 +35,26 @@ def test_list_folders_parses_display_name() -> None:
     assert folders[0].display_name == "Confluence"
 
 
+def test_list_child_folders_parses_child_count() -> None:
+    """Child listing carries ``ChildFolderCount`` so recursion knows where to dig."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "MailFolders/parent-1/childfolders" in str(request.url)
+        return httpx.Response(
+            200,
+            json={"value": [{"Id": "c1", "DisplayName": "Nested", "ChildFolderCount": 2}]},
+        )
+
+    with _client(handler) as client:
+        children = client.list_child_folders("parent-1")
+        assert client.list_child_folders("") == []  # empty id makes no request
+
+    assert len(children) == 1
+    assert children[0].id == "c1"
+    assert children[0].display_name == "Nested"
+    assert children[0].child_folder_count == 2
+
+
 def test_create_folder_returns_id() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"

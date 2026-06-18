@@ -648,11 +648,41 @@ def _matches_rule(message: Message, rule: ExistingRule) -> bool:
     return all(checks)
 
 
+_MAX_FOLDERS = 1000
+
+
 def _collect_folders(provider: MailboxProvider) -> list[Folder]:
+    """Enumerate every mail folder, recursing into nested subfolders.
+
+    OWA lists only one level per call (the Inbox's children, the top-level
+    folders, then a given folder's direct children), so folders nested two or more
+    levels deep are invisible to a single listing — which is why a rule pointing at
+    one used to show its raw folder id instead of a name. We breadth-first walk
+    outward from the Inbox children and the top-level folders, following
+    ``child_folder_count`` into deeper levels: deduping by id, capping the total so
+    a pathological tree can't run away, and treating a folder we cannot read as
+    simply having no children.
+    """
     seen: dict[str, Folder] = {}
-    for folder in provider.list_inbox_folders() + provider.list_all_folders():
-        if folder.id and folder.id not in seen:
-            seen[folder.id] = folder
+    queue: list[Folder] = []
+
+    def _enqueue(folders: list[Folder]) -> None:
+        for folder in folders:
+            if folder.id and folder.id not in seen and len(seen) < _MAX_FOLDERS:
+                seen[folder.id] = folder
+                queue.append(folder)
+
+    _enqueue(provider.list_inbox_folders() + provider.list_all_folders())
+    head = 0
+    while head < len(queue) and len(seen) < _MAX_FOLDERS:
+        folder = queue[head]
+        head += 1
+        if folder.child_folder_count > 0:
+            try:
+                children = provider.list_child_folders(folder.id)
+            except OwaApiError:
+                continue  # best effort: an unreadable folder just stays unexpanded
+            _enqueue(children)
     return list(seen.values())
 
 

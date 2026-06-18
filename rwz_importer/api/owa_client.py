@@ -77,6 +77,20 @@ class ExistingRule:
 class Folder:
     id: str
     display_name: str
+    child_folder_count: int = 0
+
+    @classmethod
+    def from_api(cls, d: dict) -> "Folder":
+        """Normalise an OWA folder object. ``ChildFolderCount`` drives recursion."""
+        try:
+            child_count = int(d.get("ChildFolderCount") or 0)
+        except (TypeError, ValueError):
+            child_count = 0
+        return cls(
+            id=d.get("Id", ""),
+            display_name=d.get("DisplayName", ""),
+            child_folder_count=child_count,
+        )
 
 
 @dataclass
@@ -196,11 +210,22 @@ class OwaClient:
     # -------------------------------------------------------------- Folders --
     def list_inbox_folders(self) -> list[Folder]:
         items = self._get_paged("MailFolders/Inbox/childfolders?$top=100")
-        return [Folder(i.get("Id", ""), i.get("DisplayName", "")) for i in items]
+        return [Folder.from_api(i) for i in items]
 
     def list_all_folders(self) -> list[Folder]:
         items = self._get_paged("MailFolders?$top=100")
-        return [Folder(i.get("Id", ""), i.get("DisplayName", "")) for i in items]
+        return [Folder.from_api(i) for i in items]
+
+    def list_child_folders(self, parent_id: str) -> list[Folder]:
+        """List the direct child folders of ``parent_id`` (one level, paginated).
+
+        OWA returns only one level per call; :func:`rwz_importer.service._collect_folders`
+        walks these to reach folders nested two or more levels deep.
+        """
+        if not parent_id:
+            return []
+        items = self._get_paged(f"MailFolders/{parent_id}/childfolders?$top=100")
+        return [Folder.from_api(i) for i in items]
 
     def create_folder(self, display_name: str) -> Folder:
         response = self._request(

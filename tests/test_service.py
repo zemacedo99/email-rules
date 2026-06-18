@@ -25,10 +25,12 @@ class FakeMailbox:
         rules: list[ExistingRule] | None = None,
         folders: list[Folder] | None = None,
         messages: list[Message] | None = None,
+        child_folders: dict[str, list[Folder]] | None = None,
     ) -> None:
         self._rules = list(rules or [])
         self._folders = list(folders or [])
         self._messages = list(messages or [])
+        self._child_folders = {k: list(v) for k, v in (child_folders or {}).items()}
         self._n = 0
         self.created_folders: list[str] = []
         self.created_rules: list[dict] = []
@@ -41,6 +43,9 @@ class FakeMailbox:
 
     def list_all_folders(self) -> list[Folder]:
         return list(self._folders)
+
+    def list_child_folders(self, parent_id: str) -> list[Folder]:
+        return list(self._child_folders.get(parent_id, []))
 
     def list_rules(self) -> list[ExistingRule]:
         return list(self._rules)
@@ -135,6 +140,20 @@ def test_read_helpers_round_trip() -> None:
     read = service.read_messages(mailbox, top=10)
     assert read["count"] == 1
     assert read["messages"][0]["sender_address"] == "a@b.com"
+
+
+def test_list_folders_recurses_into_nested_subfolders() -> None:
+    # Work (a listed folder) -> Projects -> Alpha: two levels below what a single
+    # OWA listing returns, so they only surface if _collect_folders recurses.
+    work = Folder(id="work", display_name="Work", child_folder_count=1)
+    projects = Folder(id="proj", display_name="Projects", child_folder_count=1)
+    alpha = Folder(id="alpha", display_name="Alpha")
+    mailbox = FakeMailbox(
+        folders=[work],
+        child_folders={"work": [projects], "proj": [alpha]},
+    )
+    by_id = {f["id"]: f["display_name"] for f in service.list_folders(mailbox)}
+    assert by_id == {"work": "Work", "proj": "Projects", "alpha": "Alpha"}
 
 
 def test_suggest_pass_through() -> None:
