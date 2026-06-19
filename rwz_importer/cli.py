@@ -15,6 +15,7 @@ Design priorities are safety and transparency:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -126,7 +127,7 @@ def parse(rwz_file: Path, output: Path | None, verbose: bool) -> None:
 @click.option("--yes", is_flag=True, help="Apply non-interactively (implies --no-dry-run).")
 @click.option("--base-url", default=None, help="Override the API base URL (default: the provider's).")
 @click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
-              help="Mailbox provider: outlook or gmail.")
+              help="Mailbox provider: outlook, gmail, or imap.")
 @click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
 @click.option(
     "--logfile",
@@ -165,7 +166,7 @@ def apply(
     interactive = sys.stdin.isatty()
 
     # Decide whether we will reach the server at all.
-    if not token:
+    if not token and not _is_imap(provider):
         if not dry_run:
             raise click.UsageError(
                 "apply needs a token to write changes. Pass --token or set "
@@ -175,7 +176,7 @@ def apply(
         return
 
     try:
-        with registry.build_provider(provider, {"token": token, "base_url": base_url}) as client:
+        with registry.build_provider(provider, _provider_config(provider, token, base_url)) as client:
             existing_rules = client.list_rules()
             folders = _all_folders(client)
             folder_names = _folder_name_set(folders)
@@ -233,7 +234,7 @@ def apply(
 @click.option("--mailbox", default=None, help="Target mailbox address (for reporting only).")
 @click.option("--base-url", default=None, help="Override the API base URL (default: the provider's).")
 @click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
-              help="Mailbox provider: outlook or gmail.")
+              help="Mailbox provider: outlook, gmail, or imap.")
 @click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
 def validate(
     token: str | None, expected: Path, mailbox: str | None, base_url: str | None,
@@ -241,12 +242,12 @@ def validate(
 ) -> None:
     """Compare the live mailbox rules against an expected rules JSON."""
     setup_logging(verbose=verbose)
-    if not token:
+    if not token and not _is_imap(provider):
         raise click.UsageError("validate needs a token. Pass --token or set MAIL_TOKEN/OWA_TOKEN.")
 
     ruleset = _load_json(expected)
     try:
-        with registry.build_provider(provider, {"token": token, "base_url": base_url}) as client:
+        with registry.build_provider(provider, _provider_config(provider, token, base_url)) as client:
             live_rules = client.list_rules()
     except MailboxApiError as exc:
         raise click.ClickException(_format_api_error(exc)) from exc
@@ -283,7 +284,7 @@ def validate(
 @click.option("--mailbox", default=None, help="Target mailbox address (for reporting only).")
 @click.option("--base-url", default=None, help="Override the API base URL (default: the provider's).")
 @click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
-              help="Mailbox provider: outlook or gmail.")
+              help="Mailbox provider: outlook, gmail, or imap.")
 @click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
 def report(
     token: str | None,
@@ -296,11 +297,11 @@ def report(
 ) -> None:
     """Fetch the live mailbox state and render it as Markdown or JSON."""
     setup_logging(verbose=verbose)
-    if not token:
+    if not token and not _is_imap(provider):
         raise click.UsageError("report needs a token. Pass --token or set MAIL_TOKEN/OWA_TOKEN.")
 
     try:
-        with registry.build_provider(provider, {"token": token, "base_url": base_url}) as client:
+        with registry.build_provider(provider, _provider_config(provider, token, base_url)) as client:
             rules = client.list_rules()
             folders = _all_folders(client)
     except MailboxApiError as exc:
@@ -350,7 +351,7 @@ def report(
 )
 @click.option("--base-url", default=None, help="Override the API base URL (default: the provider's).")
 @click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
-              help="Mailbox provider: outlook or gmail.")
+              help="Mailbox provider: outlook, gmail, or imap.")
 @click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
 def suggest(
     token: str | None,
@@ -372,11 +373,11 @@ def suggest(
     applied: feed an accepted suggestion back through `apply --from-json`.
     """
     setup_logging(verbose=verbose)
-    if not token:
+    if not token and not _is_imap(provider):
         raise click.UsageError("suggest needs a token. Pass --token or set MAIL_TOKEN/OWA_TOKEN.")
 
     try:
-        with registry.build_provider(provider, {"token": token, "base_url": base_url}) as client:
+        with registry.build_provider(provider, _provider_config(provider, token, base_url)) as client:
             messages = client.list_messages(folder=folder, top=top)
             existing = client.list_rules()
     except MailboxApiError as exc:
@@ -535,6 +536,26 @@ def _parse_address_map(pairs: tuple[str, ...]) -> dict[str, str]:
             raise click.UsageError(f"--map-address expects OLD=NEW, got {pair!r}.")
         mapping[old] = new
     return mapping
+
+
+def _is_imap(provider: str) -> bool:
+    return registry.canonical_provider(provider) == "imap"
+
+
+def _provider_config(provider: str, token: str | None, base_url: str | None) -> dict:
+    """Credentials for the registry. Token providers use --token/--base-url; IMAP reads
+    MAIL_IMAP_* / MAIL_SIEVE_* env vars (host/username/password) since it has no token."""
+    if _is_imap(provider):
+        return {
+            "host": os.environ.get("MAIL_IMAP_HOST", ""),
+            "port": int(os.environ.get("MAIL_IMAP_PORT") or 993),
+            "username": os.environ.get("MAIL_IMAP_USERNAME", ""),
+            "password": os.environ.get("MAIL_IMAP_PASSWORD", ""),
+            "use_ssl": os.environ.get("MAIL_IMAP_SSL", "1") not in ("0", "false", "False"),
+            "sieve_host": os.environ.get("MAIL_SIEVE_HOST", ""),
+            "sieve_port": int(os.environ.get("MAIL_SIEVE_PORT") or 4190),
+        }
+    return {"token": token, "base_url": base_url}
 
 
 def _all_folders(client: MailboxProvider) -> list[Folder]:

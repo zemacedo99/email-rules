@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rwz-importer"
 version = "1.0.0"
-description = "Parse Outlook Classic .rwz rule exports and recreate them as server-side rules in New Outlook / Outlook Web via the OWA REST API."
+description = "Manage server-side inbox rules across providers (Outlook/Exchange, Gmail, IMAP/Sieve), and import Outlook Classic .rwz rule exports."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "rwz-importer contributors" }]
-keywords = ["outlook", "rwz", "exchange", "owa", "rules", "migration"]
+keywords = ["outlook", "gmail", "imap", "sieve", "rwz", "exchange", "owa", "rules", "migration"]
 dependencies = [
     "httpx>=0.24",
     "click>=8.1",
@@ -25,12 +25,16 @@ web = [
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
 ]
+imap = [
+    "sievelib>=1.4",
+]
 dev = [
     "pytest>=7.0",
     "mcp>=1.2",
     "starlette>=0.37",
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
+    "sievelib>=1.4",
 ]
 
 [project.scripts]

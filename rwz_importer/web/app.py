@@ -74,19 +74,52 @@ class _Config:
         self.google_refresh_token: str | None = None
         self.google_expiry: float = 0.0
         self.google_pending: dict | None = None
+        # IMAP/Sieve connection (host/username/password, not a token). The password is
+        # held here only and never returned to the browser.
+        self.imap: dict = {
+            "host": os.environ.get("MAIL_IMAP_HOST") or "",
+            "port": int(os.environ.get("MAIL_IMAP_PORT") or 993),
+            "username": os.environ.get("MAIL_IMAP_USERNAME") or "",
+            "password": os.environ.get("MAIL_IMAP_PASSWORD") or "",
+            "use_ssl": (os.environ.get("MAIL_IMAP_SSL", "1") not in ("0", "false", "False")),
+            "sieve_host": os.environ.get("MAIL_SIEVE_HOST") or "",
+            "sieve_port": int(os.environ.get("MAIL_SIEVE_PORT") or 4190),
+        }
+
+    @property
+    def auth_kind(self) -> str:
+        return registry.provider_info(self.provider)["auth"]  # "token" or "imap"
+
+    def is_connected(self) -> bool:
+        """Whether the current provider has enough credentials to make a call."""
+        if self.auth_kind == "imap":
+            return bool(self.imap["host"] and self.imap["username"] and self.imap["password"])
+        return bool(self.token)
+
+    def provider_config(self) -> dict:
+        """The credential dict the registry needs for the current provider."""
+        if self.auth_kind == "imap":
+            return dict(self.imap)
+        return {"token": self.token, "base_url": self.base_url}
 
     def public_view(self) -> dict:
-        """Config safe to send to the browser — secrets (token, client secret) are never included."""
+        """Config safe to send to the browser — secrets (token, passwords) are never included."""
         info = registry.provider_info(self.provider)
+        imap_public = {k: v for k, v in self.imap.items() if k != "password"}
         return {
+            "connected": self.is_connected(),
             "token_set": bool(self.token),
             "mailbox": self.mailbox,
             "provider": self.provider,
+            "auth": info["auth"],
             "base_url": self.base_url or info["default_base_url"],
             "capabilities": info["capabilities"],
             "providers": registry.all_provider_info(),
             # Whether a Google OAuth client is configured (booleans only, never the values).
             "google_client_set": bool(self.google_client_id and self.google_client_secret),
+            # IMAP connection fields minus the password (only a boolean for that).
+            "imap": imap_public,
+            "imap_password_set": bool(self.imap["password"]),
         }
 
 
@@ -117,11 +150,9 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
     if client_factory is None:
         def client_factory() -> MailboxProvider:  # default: real provider via the registry
             _maybe_refresh_google()
-            if not config.token:
-                raise _NeedsToken("No token set. Connect an account in the Connection panel first.")
-            return registry.build_provider(
-                config.provider, {"token": config.token, "base_url": config.base_url}
-            )
+            if not config.is_connected():
+                raise _NeedsToken("Not connected. Configure an account in the Connection panel first.")
+            return registry.build_provider(config.provider, config.provider_config())
 
     @contextmanager
     def provider() -> Iterator[MailboxProvider]:
@@ -172,11 +203,13 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
                 config.google_refresh_token = None
                 config.google_expiry = 0.0
                 config.google_pending = None
+                config.imap["password"] = ""  # credentials are provider-specific
         if body.get("clear_token"):
             config.token = None
             config.google_refresh_token = None
             config.google_expiry = 0.0
             config.google_pending = None  # cancel any in-flight sign-in so it can't re-set a token
+            config.imap["password"] = ""  # disconnect the IMAP account too
         elif body.get("token"):
             config.token = str(body["token"]).strip()
         if "mailbox" in body:
@@ -187,6 +220,21 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
             config.google_client_id = (body.get("google_client_id") or "").strip() or None
         if "google_client_secret" in body:
             config.google_client_secret = (body.get("google_client_secret") or "").strip() or None
+        if isinstance(body.get("imap"), dict):
+            incoming = body["imap"]
+            for key in ("host", "username", "sieve_host"):
+                if key in incoming:
+                    config.imap[key] = (incoming.get(key) or "").strip()
+            for key in ("port", "sieve_port"):
+                if key in incoming and incoming[key] not in (None, ""):
+                    try:
+                        config.imap[key] = int(incoming[key])
+                    except (TypeError, ValueError):
+                        pass
+            if "use_ssl" in incoming:
+                config.imap["use_ssl"] = bool(incoming["use_ssl"])
+            if incoming.get("password"):  # only overwrite when a new one is supplied
+                config.imap["password"] = str(incoming["password"])
         return JSONResponse(config.public_view())
 
     # -- sign in with Microsoft (device code; token stays in memory) ------------

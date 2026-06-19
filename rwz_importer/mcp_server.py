@@ -63,17 +63,39 @@ _WRITE = ToolAnnotations(
 
 # --------------------------------------------------------------- client setup --
 def _make_client() -> MailboxProvider:
-    """Build the configured provider from env: MAIL_PROVIDER + MAIL_TOKEN (or OWA_*)."""
+    """Build the configured provider from env.
+
+    Token providers: MAIL_PROVIDER (default outlook) + MAIL_TOKEN (or OWA_TOKEN). IMAP:
+    MAIL_PROVIDER=imap + MAIL_IMAP_HOST / MAIL_IMAP_USERNAME / MAIL_IMAP_PASSWORD (and
+    optional MAIL_IMAP_PORT / MAIL_IMAP_SSL / MAIL_SIEVE_HOST / MAIL_SIEVE_PORT).
+    """
     provider = (
         os.environ.get("MAIL_PROVIDER") or os.environ.get("OWA_PROVIDER") or registry.DEFAULT_PROVIDER
     )
+    if registry.canonical_provider(provider) == "imap":
+        host = os.environ.get("MAIL_IMAP_HOST")
+        if not host:
+            raise RuntimeError(
+                "MAIL_IMAP_HOST is not set. For the IMAP provider set MAIL_IMAP_HOST / "
+                "MAIL_IMAP_USERNAME / MAIL_IMAP_PASSWORD (and optional MAIL_IMAP_PORT, "
+                "MAIL_IMAP_SSL, MAIL_SIEVE_HOST, MAIL_SIEVE_PORT) in this server's environment."
+            )
+        return registry.build_provider(provider, {
+            "host": host,
+            "port": int(os.environ.get("MAIL_IMAP_PORT") or 993),
+            "username": os.environ.get("MAIL_IMAP_USERNAME", ""),
+            "password": os.environ.get("MAIL_IMAP_PASSWORD", ""),
+            "use_ssl": os.environ.get("MAIL_IMAP_SSL", "1") not in ("0", "false", "False"),
+            "sieve_host": os.environ.get("MAIL_SIEVE_HOST", ""),
+            "sieve_port": int(os.environ.get("MAIL_SIEVE_PORT") or 4190),
+        })
     token = os.environ.get("MAIL_TOKEN") or os.environ.get("OWA_TOKEN")
     if not token:
         raise RuntimeError(
             "No mailbox token is set. Set MAIL_TOKEN (or OWA_TOKEN) in this MCP "
             "server's environment (the `env` block of the server config) — never "
             "paste a token into chat. See the token_help tool for how to obtain one. "
-            "Set MAIL_PROVIDER=gmail to target Gmail."
+            "Set MAIL_PROVIDER=gmail to target Gmail, or MAIL_PROVIDER=imap for IMAP."
         )
     base_url = os.environ.get("MAIL_BASE_URL") or os.environ.get("OWA_BASE_URL")
     return registry.build_provider(provider, {"token": token, "base_url": base_url})

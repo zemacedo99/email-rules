@@ -478,12 +478,42 @@
             <input id="token" type="password" placeholder="paste the token here" autocomplete="off" />
           </details>
 
+          <!-- IMAP/Sieve only: host + credentials (no token) -->
+          <div id="imapForm" class="hidden" style="margin-top:6px">
+            <p class="hint" style="margin:8px 0 8px">Connect to any IMAP server that exposes
+              server-side <b>Sieve</b> rules over <b>ManageSieve</b> (e.g. Dovecot, Cyrus, Fastmail).
+              Uses your username and an app password, held in this server's memory only.</p>
+            <div class="row">
+              <div><label for="imHost">IMAP host</label>
+                <input id="imHost" type="text" placeholder="imap.example.com" autocomplete="off" /></div>
+              <div style="flex:0 1 130px"><label for="imPort">IMAP port</label>
+                <input id="imPort" type="number" value="993" /></div>
+            </div>
+            <div class="row">
+              <div><label for="imUser">Username</label>
+                <input id="imUser" type="text" placeholder="you@example.com" autocomplete="off" /></div>
+              <div><label for="imPass">Password / app password</label>
+                <input id="imPass" type="password" placeholder="app password" autocomplete="off" /></div>
+            </div>
+            <details class="advanced">
+              <summary>Advanced (TLS &amp; ManageSieve)</summary>
+              <div class="check"><input id="imSsl" type="checkbox" checked />
+                <label for="imSsl">Use SSL/TLS for IMAP (port 993)</label></div>
+              <div class="row" style="margin-top:8px">
+                <div><label for="imSieveHost">ManageSieve host</label>
+                  <input id="imSieveHost" type="text" placeholder="(same as IMAP host)" /></div>
+                <div style="flex:0 1 150px"><label for="imSievePort">ManageSieve port</label>
+                  <input id="imSievePort" type="number" value="4190" /></div>
+              </div>
+            </details>
+          </div>
+
           <div class="row" style="margin-top:14px">
             <div>
               <label for="mailbox">Mailbox / account (label only)</label>
               <input id="mailbox" type="text" placeholder="you@example.com" />
             </div>
-            <div>
+            <div id="baseUrlField">
               <label for="baseUrl">API base URL (advanced)</label>
               <input id="baseUrl" type="text" />
             </div>
@@ -583,10 +613,16 @@ function applyProviderUI() {
   }
   const isOutlook = currentProvider === "outlook";
   const isGmail = currentProvider === "gmail";
+  const auth = (providersInfo.find((p) => p.id === currentProvider) || {}).auth || "token";
+  const isImap = auth === "imap";
   if ($("msSignin")) $("msSignin").classList.toggle("hidden", !isOutlook);
   if ($("gmailSignin")) $("gmailSignin").classList.toggle("hidden", !isGmail);
   if ($("outlookHelp")) $("outlookHelp").classList.toggle("hidden", !isOutlook);
   if ($("gmailHelp")) $("gmailHelp").classList.toggle("hidden", !isGmail);
+  // IMAP uses host/credentials instead of a token: swap the token UI for the IMAP form.
+  if ($("imapForm")) $("imapForm").classList.toggle("hidden", !isImap);
+  if ($("manualBox")) $("manualBox").classList.toggle("hidden", isImap);
+  if ($("baseUrlField")) $("baseUrlField").classList.toggle("hidden", isImap);
 }
 function applyConfig(c) {
   caps = c.capabilities || {};
@@ -595,8 +631,16 @@ function applyConfig(c) {
   currentMailbox = c.mailbox || "";
   $("mailbox").value = currentMailbox;
   $("baseUrl").value = c.base_url || "";
+  const im = c.imap || {};
+  if ($("imHost")) $("imHost").value = im.host || "";
+  if ($("imPort")) $("imPort").value = im.port || 993;
+  if ($("imUser")) $("imUser").value = im.username || "";
+  if ($("imSsl")) $("imSsl").checked = im.use_ssl !== false;
+  if ($("imSieveHost")) $("imSieveHost").value = im.sieve_host || "";
+  if ($("imSievePort")) $("imSievePort").value = im.sieve_port || 4190;
+  if ($("imPass")) $("imPass").placeholder = c.imap_password_set ? "saved — leave blank to keep" : "app password";
   applyProviderUI();
-  setConnected(c.token_set);
+  setConnected(!!c.connected);
 }
 async function loadConfig() {
   const c = await api("GET", "/api/config");
@@ -613,11 +657,11 @@ async function changeProvider(id) {
   } catch (e) { toast(e.message, "bad"); }
 }
 function setConnected(on) {
-  tokenSet = !!on;
+  tokenSet = !!on;   // "connected" — kept under this name for the rest of the app
   const pill = $("connPill");
-  pill.textContent = on ? "token set" : "no token";
+  pill.textContent = on ? "connected" : "not connected";
   pill.classList.toggle("on", !!on);
-  $("configStatus").textContent = on ? "Token is set." : "No token yet.";
+  $("configStatus").textContent = on ? "Connected." : "Not connected yet.";
   // Connection view: when a token is set we only show a reset control; the full
   // instructions + setup form are reserved for the disconnected state.
   const label = currentMailbox || "Connected";
@@ -630,21 +674,36 @@ function setConnected(on) {
   $("navForget").classList.toggle("hidden", !on);
 }
 async function saveConfig() {
-  const body = { mailbox: $("mailbox").value, base_url: $("baseUrl").value };
-  const tok = $("token").value.trim();
-  if (tok) body.token = tok;
+  const auth = (providersInfo.find((p) => p.id === currentProvider) || {}).auth || "token";
+  const body = { mailbox: $("mailbox").value };
+  if (auth === "imap") {
+    body.imap = {
+      host: $("imHost").value.trim(),
+      port: parseInt($("imPort").value, 10) || 993,
+      username: $("imUser").value.trim(),
+      use_ssl: $("imSsl").checked,
+      sieve_host: $("imSieveHost").value.trim(),
+      sieve_port: parseInt($("imSievePort").value, 10) || 4190,
+    };
+    const pw = $("imPass").value;
+    if (pw) body.imap.password = pw;     // only send a new password when typed
+  } else {
+    body.base_url = $("baseUrl").value;
+    const tok = $("token").value.trim();
+    if (tok) body.token = tok;
+  }
   const c = await api("POST", "/api/config", body);
   $("token").value = "";
+  if ($("imPass")) $("imPass").value = "";
   applyConfig(c);
   toast("Setup saved.", "good");
-  if (c.token_set) { showView("rules"); await refreshFolders(); await refreshRules(); }
+  if (c.connected) { showView("rules"); await refreshFolders().catch(() => {}); await refreshRules().catch(() => {}); }
 }
 async function clearToken() {
   const c = await api("POST", "/api/config", { clear_token: true });
-  currentMailbox = c.mailbox || "";
-  setConnected(c.token_set);
+  applyConfig(c);
   showView("connect");
-  toast("Token forgotten.");
+  toast("Disconnected.");
 }
 
 /* ---- sign in with Microsoft (device-code flow) ----------------------------- */
@@ -670,7 +729,7 @@ async function signInGoogle() {
       if (st.token_set) {
         const c = await loadConfig();
         toast("Signed in with Google.", "good");
-        if (c.token_set) { showView("rules"); await refreshFolders().catch(() => {}); await refreshRules().catch(() => {}); }
+        if (c.connected) { showView("rules"); await refreshFolders().catch(() => {}); await refreshRules().catch(() => {}); }
         return;
       }
     }
@@ -1109,12 +1168,12 @@ $("suggestWrap").addEventListener("click", (e) => {
   applyResponsiveDefault();                  // desktop opens the sidebar; mobile starts with the drawer closed
   try {
     const c = await loadConfig();
-    if (c.token_set) {
+    if (c.connected) {
       showView("import");                    // connected: start on Import .rwz
       await refreshFolders().catch(() => {});
       await refreshRules();
     } else {
-      showView("connect");                   // no token: land on the connect flow
+      showView("connect");                   // not connected: land on the connect flow
     }
   } catch (e) {
     toast(e.message, "bad");

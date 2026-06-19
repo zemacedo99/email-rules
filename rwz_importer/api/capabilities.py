@@ -45,3 +45,15 @@ class ProviderCapabilities:
             "archive_toggle": self.archive_toggle,
             "hierarchical_folders": self.hierarchical_folders,
         }
+
+
+# IMAP/Sieve shares the Exchange baseline: ordered rules, stop-processing, folder
+# destinations. Defined here (not in the client) so the registry/UI can read it without
+# importing the IMAP client — which pulls in the optional ``sievelib`` dependency.
+IMAP_CAPABILITIES = ProviderCapabilities(
+    ordered_rules=True,
+    stop_processing=True,
+    destination_kind="folder",
+    archive_toggle=False,
+    hierarchical_folders=True,
+)

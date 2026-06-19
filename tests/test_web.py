@@ -54,7 +54,7 @@ def test_config_reports_token_set_but_never_returns_token(client: TestClient) ->
     # Provider-aware fields the UI relies on to render terminology.
     assert body["provider"] == "outlook"
     assert body["capabilities"]["destination_kind"] == "folder"
-    assert {p["id"] for p in body["providers"]} == {"outlook", "gmail"}
+    assert {p["id"] for p in body["providers"]} == {"outlook", "gmail", "imap"}
 
     got = client.get("/api/config").json()
     assert got["token_set"] is True and got["mailbox"] == "me@x.com"
@@ -80,6 +80,26 @@ def test_create_rule_threads_archive_through_web() -> None:
     assert res.status_code == 200, res.text
     assert res.json()["created"]["archive"] is False
     assert fake.created_rules[-1]["archive"] is False
+
+
+def test_imap_config_connects_without_token_and_hides_password() -> None:
+    web = TestClient(create_app(lambda: FakeMailbox()))
+    body = web.post("/api/config", json={"provider": "imap"}).json()
+    assert body["provider"] == "imap" and body["auth"] == "imap"
+    assert body["connected"] is False  # nothing configured yet
+
+    body = web.post(
+        "/api/config",
+        json={"imap": {"host": "imap.example.com", "username": "u@e.com", "password": "secret-pw"}},
+    ).json()
+    assert body["connected"] is True  # connected with no token at all
+    assert body["token_set"] is False
+    assert body["imap"]["host"] == "imap.example.com"
+    assert "password" not in body["imap"] and "secret-pw" not in str(body)  # never echoed
+    assert body["imap_password_set"] is True
+
+    cleared = web.post("/api/config", json={"clear_token": True}).json()
+    assert cleared["connected"] is False  # Forget disconnects the IMAP account too
 
 
 def test_google_start_rejects_non_gmail_provider() -> None:
