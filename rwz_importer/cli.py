@@ -46,7 +46,11 @@ from rwz_importer.report.generator import generate_json_report, generate_markdow
 @click.group()
 @click.version_option(package_name="rwz-importer", message="%(version)s")
 def cli() -> None:
-    """Email Rule Manager - import Outlook Classic ``.rwz`` rules into a New Outlook / OWA mailbox."""
+    """Email Rule Manager - manage server-side inbox rules across Outlook, Gmail, and IMAP/Sieve.
+
+    Pick a backend with ``--provider`` (outlook | gmail | imap); also imports Outlook
+    Classic ``.rwz`` exports into any of them.
+    """
 
 
 # --------------------------------------------------------------------- parse --
@@ -805,12 +809,22 @@ def _format_api_error(exc: MailboxApiError) -> str:
 
 
 _TOKEN_HELP = """\
+Obtain a token (Outlook shown below; see other providers)
+=========================================================
+
+This covers Outlook/Exchange. For other providers:
+  - Gmail: paste an OAuth token from https://developers.google.com/oauthplayground/
+    (scopes: gmail.settings.basic gmail.labels gmail.modify), or run
+    `rwz-importer login --provider gmail --client-id ... --client-secret ...`.
+  - IMAP: no token — set MAIL_IMAP_HOST / MAIL_IMAP_USERNAME / MAIL_IMAP_PASSWORD
+    and use `--provider imap`.
+
 Obtain an OWA bearer token
 ==========================
 
-The token is read at runtime from --token or the OWA_TOKEN environment variable
-and is NEVER written to disk by this tool. Treat it like a password: it grants
-access to your mailbox and expires after about an hour.
+The token is read at runtime from --token or the MAIL_TOKEN/OWA_TOKEN environment
+variable and is NEVER written to disk by this tool. Treat it like a password: it
+grants access to your mailbox and expires after about an hour.
 
 Easiest: sign in with Microsoft
 -------------------------------

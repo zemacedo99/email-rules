@@ -1,10 +1,18 @@
 # Email Rule Manager
 
-Parse Outlook **Classic** `.rwz` rule exports and recreate them as **server-side
-Exchange inbox rules** in **New Outlook / Outlook on the web**, via the OWA REST API
-(`https://outlook.office.com/api/v2.0/me/`).
+Manage **server-side inbox rules** across providers from one tool — **Outlook /
+Exchange**, **Gmail**, and any **IMAP server with Sieve** (ManageSieve). List, create,
+edit, delete and **run** rules over your existing mail, get **rule suggestions** from
+recent traffic, and **import Outlook Classic `.rwz`** exports into any of them.
 
 _Installed as the `rwz-importer` command (CLI, local web UI, and MCP server)._
+
+> **Providers at a glance.** Outlook/Exchange via the OWA REST API
+> (`outlook.office.com`); Gmail via the Gmail API (labels = folders, filters = rules);
+> generic IMAP via `imaplib` for folders/messages and **Sieve over ManageSieve** for
+> rules. All three are driven through one `MailboxProvider` seam, so the CLI, web UI, and
+> MCP server — and every safety guarantee — work the same whichever you pick. See
+> [Providers](#providers).
 
 ## Why this exists
 
@@ -37,12 +45,57 @@ All three share one engine, so the safety rules (dry-run/preview first, never de
 outside a confirmed replace, never rewrite a cross-mailbox address silently) hold whichever
 you use.
 
+## Providers
+
+Pick a provider with `--provider` (CLI), `MAIL_PROVIDER` (MCP/web env), or the selector in
+the web UI's **Connection** panel. The default is `outlook`.
+
+| Provider | id | Rules | Destinations | Auth | Notes |
+|---|---|---|---|---|---|
+| Outlook / Exchange | `outlook` | ordered, stop-processing | folders | bearer token | Microsoft sign-in or paste |
+| Gmail | `gmail` | **unordered**, no stop | **labels** | OAuth token | paste a token, or full "Sign in with Google" |
+| IMAP + Sieve | `imap` | ordered, stop-processing | folders | host + app password | needs **ManageSieve** (Dovecot/Cyrus/Fastmail…); `pip install -e ".[imap]"` |
+
+Because the rule models differ, the UI adapts per provider: it says **folder** or **label**
+as appropriate, and Gmail (where applying a label and removing from the Inbox are separate)
+shows a per-rule **"also archive"** toggle that the folder providers don't need (a move
+already leaves the inbox).
+
+### Gmail
+
+"Move to" maps to **applying a label**, plus removing the `INBOX` label when *archive* is
+on. Conditions compile to a Gmail search query (`from:(a OR b) subject:("x" OR "y")`).
+Two ways to connect:
+
+- **Paste a token (quickest).** Get a short-lived OAuth access token from the
+  [OAuth 2.0 Playground](https://developers.google.com/oauthplayground/) with scopes
+  `gmail.settings.basic gmail.labels gmail.modify`, and paste it (web **Connection** panel,
+  `--token`, or `MAIL_TOKEN`). No Google Cloud setup; lasts ~1h.
+- **Full "Sign in with Google" (persistent).** Create your own OAuth client of type
+  **Desktop app** in Google Cloud (Gmail API enabled), then use the web UI's **Sign in with
+  Google** button or `rwz-importer login --provider gmail --client-id … --client-secret …`.
+  A refresh token keeps the session alive past the 1h access-token lifetime.
+
+### IMAP + Sieve
+
+For any server exposing rules over **ManageSieve** (Dovecot, Cyrus, Fastmail, …). Folders,
+message metadata and moves go over IMAP; rules are stored as a single active **Sieve**
+script (other filters in it are preserved; an unparseable script is never overwritten).
+Connect with host + username + **app password** (the web UI's IMAP form, or
+`MAIL_IMAP_HOST` / `MAIL_IMAP_USERNAME` / `MAIL_IMAP_PASSWORD`, with optional
+`MAIL_IMAP_PORT` / `MAIL_IMAP_SSL` / `MAIL_SIEVE_HOST` / `MAIL_SIEVE_PORT`). Install the
+extra: `pip install -e ".[imap]"`.
+
 ## Requirements
 
 - Python ≥ 3.10
-- A Microsoft 365 / Outlook account you can sign in to, for a short-lived bearer token.
-  `rwz-importer login` gets one for you via device-code sign-in; or copy one from the
-  browser (see [Getting a token](#getting-a-token))
+- An account for the provider you target:
+  - **Outlook/Exchange** — a Microsoft 365 account; `rwz-importer login` gets a short-lived
+    bearer token via device-code sign-in, or copy one from the browser (see
+    [Connecting an account](#2-connecting-an-account)).
+  - **Gmail** — an OAuth access token (paste) or your own Desktop OAuth client (sign-in).
+  - **IMAP** — host + username + app password on a ManageSieve-capable server, plus the
+    `imap` extra.
 
 ## Install
 
@@ -91,7 +144,12 @@ rule by setting `"exclude": true`, or fix any address, before applying. Addresse
 belong to a *different* mailbox are flagged with `addressMayBelongToDifferentMailbox` and
 marked `[review]` in the table.
 
-### 2. Getting a token
+### 2. Connecting an account
+
+The examples here use **Outlook** (the default provider). For **Gmail** add
+`--provider gmail` (paste an OAuth token, or `rwz-importer login --provider gmail
+--client-id … --client-secret …`); for **IMAP** add `--provider imap` and set the
+`MAIL_IMAP_*` env vars. See [Providers](#providers). The Outlook token options follow.
 
 **Easiest — sign in with Microsoft (device code):**
 
@@ -271,23 +329,30 @@ rwz-importer-mcp          # or: python -m rwz_importer.mcp_server
 
 ### The token lives in the server's environment — never in chat
 
-The server reads the bearer token from its own **`OWA_TOKEN` environment variable**; it is
-**not** a tool argument, so it never flows through the agent's context or a transcript. Set
-it in the MCP client's server config (and `OWA_BASE_URL` to override the endpoint):
+The server reads credentials from its own **environment**; they are **not** tool
+arguments, so they never flow through the agent's context or a transcript. Set
+`MAIL_PROVIDER` (default `outlook`) and the matching credentials in the MCP client's
+server config:
 
 ```json
 {
   "mcpServers": {
     "rwz-importer": {
       "command": "rwz-importer-mcp",
-      "env": { "OWA_TOKEN": "<paste-token-here>" }
+      "env": { "MAIL_PROVIDER": "outlook", "MAIL_TOKEN": "<paste-token-here>" }
     }
   }
 }
 ```
 
+- **Outlook/Gmail:** `MAIL_TOKEN` (a bearer/OAuth token; `OWA_TOKEN` still works for
+  Outlook), optionally `MAIL_BASE_URL`.
+- **IMAP** (`MAIL_PROVIDER=imap`): `MAIL_IMAP_HOST`, `MAIL_IMAP_USERNAME`,
+  `MAIL_IMAP_PASSWORD` (plus optional `MAIL_IMAP_PORT` / `MAIL_IMAP_SSL` /
+  `MAIL_SIEVE_HOST` / `MAIL_SIEVE_PORT`).
+
 For Claude Code you can also add it from the shell:
-`claude mcp add rwz-importer --env OWA_TOKEN=<token> -- rwz-importer-mcp`.
+`claude mcp add rwz-importer --env MAIL_TOKEN=<token> -- rwz-importer-mcp`.
 
 ### Apply with confirmation (how a write is gated)
 
@@ -338,20 +403,29 @@ These hold whether you use the CLI, the web UI, or the MCP server:
 
 ## Limitations & future work
 
-- The parser is validated against the bundled fixture and the common rule types it
+- The `.rwz` parser is validated against the bundled fixture and the common rule types it
   contains (subject-contains, from-address, sender-contains). Other rule types
   (body, importance, sensitivity, message-class) are surfaced as
   `unsupportedConditions` warnings rather than silently dropped.
-- Live `apply` / `validate` / `report` / `suggest` and the MCP server's live tools require a
-  user-supplied token and act on a real mailbox, so they are covered by mocked / in-memory
-  tests here, not live integration tests.
+- **No live integration tests.** Every provider acts on a real account with user-supplied
+  credentials, so all three are covered by mocked HTTP / in-memory / fake-transport tests,
+  not live calls. Validate against a real mailbox before trusting a migration — especially
+  Gmail and IMAP, which can't be exercised in this environment at all.
+- **Gmail** filters are **unordered** and have no "stop processing", so two filters can both
+  apply to one message (labels union); they also have no name, so list views show a name
+  synthesised from the criteria.
+- **IMAP/Sieve** needs a server that speaks **ManageSieve** (Gmail/Outlook do not). A single
+  rule that mixes several senders **and** a subject can't be expressed as one Sieve filter
+  here (it would compile to a never-matching `allof`), so it's refused with a clear error —
+  split it into one rule per condition type. Mailbox names are used as-is (no modified-UTF-7
+  conversion), and "run over the inbox" moves operate on the Inbox.
 - `suggest` is heuristic (volume, domain clustering, subject tags) over a recent sample of
   message metadata; it is advisory and tuned by its `--min-*` thresholds.
-- The mailbox layer is behind a `MailboxProvider` interface (the OWA client is one
-  implementation), so a Graph or IMAP backend could slot in later without touching the
-  engine, suggestion, or MCP layers.
-- Future work: OAuth PKCE instead of a pasted token, more condition types,
-  `.olk15Rules` (Outlook for Mac) support, and a small web UI.
+- The mailbox layer is a `MailboxProvider` seam with three implementations (Outlook/OWA,
+  Gmail, IMAP/Sieve); another backend (e.g. Microsoft Graph) could slot in without touching
+  the engine, suggestion, web, or MCP layers.
+- Future work: nested Sieve (`allof(anyof…)`) for multi-type IMAP rules, modified-UTF-7 for
+  IMAP mailbox names, more condition types, and `.olk15Rules` (Outlook for Mac) support.
 
 ## Development
 

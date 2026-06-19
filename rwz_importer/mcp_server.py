@@ -293,11 +293,21 @@ def apply_plan(
 
 
 _TOKEN_HELP = """\
-Obtain an OWA bearer token and give it to this MCP server
-=========================================================
+Give this MCP server credentials via its environment (never via chat)
+====================================================================
 
-This server reads the token from the OWA_TOKEN environment variable of its own
-process — set it in the MCP client's server config under `env`. Do NOT paste the
+Set MAIL_PROVIDER (outlook | gmail | imap) plus the matching credentials in the MCP
+client's server config under `env`:
+  - outlook / gmail: MAIL_TOKEN = <bearer/OAuth token>  (OWA_TOKEN still works for outlook)
+  - imap:            MAIL_IMAP_HOST / MAIL_IMAP_USERNAME / MAIL_IMAP_PASSWORD
+For Gmail, get a token from https://developers.google.com/oauthplayground/ (scopes
+gmail.settings.basic gmail.labels gmail.modify). The Outlook manual method follows.
+
+Obtain an OWA bearer token
+==========================
+
+This server reads the token from the MAIL_TOKEN/OWA_TOKEN environment variable of its
+own process — set it in the MCP client's server config under `env`. Do NOT paste the
 token into chat; treat it like a password (it grants mailbox access and expires
 after about an hour).
 
