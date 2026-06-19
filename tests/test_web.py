@@ -82,6 +82,85 @@ def test_create_rule_threads_archive_through_web() -> None:
     assert fake.created_rules[-1]["archive"] is False
 
 
+def test_google_start_rejects_non_gmail_provider() -> None:
+    web = TestClient(create_app(lambda: FakeMailbox()))  # default provider is outlook
+    assert web.post("/api/auth/google/start", json={}).status_code == 400
+
+
+def test_google_client_creds_are_never_echoed() -> None:
+    web = TestClient(create_app(lambda: FakeMailbox(capabilities=_GMAIL_CAPS)), base_url="http://127.0.0.1:8765")
+    web.post("/api/config", json={"provider": "gmail"})
+    body = web.post(
+        "/api/config", json={"google_client_id": "cid-123", "google_client_secret": "sec-xyz"}
+    ).json()
+    assert body["google_client_set"] is True
+    assert "google_client_secret" not in body and "sec-xyz" not in str(body)
+
+
+def test_google_signin_flow_sets_token_without_echoing_it(monkeypatch) -> None:
+    import urllib.parse as up
+
+    web = TestClient(create_app(lambda: FakeMailbox(capabilities=_GMAIL_CAPS)), base_url="http://127.0.0.1:8765")
+    web.post("/api/config", json={"provider": "gmail"})
+    assert web.post("/api/auth/google/start", json={}).status_code == 400  # needs creds first
+    web.post("/api/config", json={"google_client_id": "cid", "google_client_secret": "sec"})
+
+    start = web.post("/api/auth/google/start", json={})
+    assert start.status_code == 200
+    q = dict(up.parse_qsl(up.urlparse(start.json()["auth_url"]).query))
+    state = q["state"]
+    assert q["redirect_uri"].endswith("/api/auth/google/callback")  # decoded by parse_qsl
+
+    monkeypatch.setattr(
+        "rwz_importer.auth_google.exchange_code",
+        lambda **kw: {"access_token": "AT-secret", "refresh_token": "RT", "expires_in": 3600},
+    )
+    cb = web.get(f"/api/auth/google/callback?code=CODE&state={state}")
+    assert cb.status_code == 200 and "Signed in" in cb.text
+    assert "AT-secret" not in cb.text  # token never rendered in the page
+
+    assert web.get("/api/auth/google/status").json()["token_set"] is True
+    assert web.get("/api/config").json()["token_set"] is True
+
+
+def test_google_callback_escapes_error_param() -> None:
+    """The callback must HTML-escape Google's error param (reflected-XSS guard)."""
+    web = TestClient(create_app(lambda: FakeMailbox(capabilities=_GMAIL_CAPS)), base_url="http://127.0.0.1:8765")
+    web.post("/api/config", json={"provider": "gmail"})
+    res = web.get("/api/auth/google/callback?error=<script>alert(1)</script>")
+    assert res.status_code == 400
+    assert "<script>alert(1)</script>" not in res.text  # not reflected verbatim
+    assert "&lt;script&gt;" in res.text  # escaped
+    assert "Content-Security-Policy" in res.headers
+
+
+def test_clear_token_cancels_pending_google_signin(monkeypatch) -> None:
+    """Forgetting the token mid-sign-in must stop a late callback from re-connecting."""
+    import urllib.parse as up
+
+    web = TestClient(create_app(lambda: FakeMailbox(capabilities=_GMAIL_CAPS)), base_url="http://127.0.0.1:8765")
+    web.post("/api/config", json={"provider": "gmail", "google_client_id": "cid", "google_client_secret": "sec"})
+    start = web.post("/api/auth/google/start", json={})
+    state = dict(up.parse_qsl(up.urlparse(start.json()["auth_url"]).query))["state"]
+    web.post("/api/config", json={"clear_token": True})  # cancels the in-flight sign-in
+    monkeypatch.setattr(
+        "rwz_importer.auth_google.exchange_code",
+        lambda **kw: {"access_token": "AT", "expires_in": 3600},
+    )
+    cb = web.get(f"/api/auth/google/callback?code=CODE&state={state}")
+    assert cb.status_code == 400  # pending was wiped, so the state no longer matches
+    assert web.get("/api/config").json()["token_set"] is False
+
+
+def test_google_callback_rejects_bad_state(monkeypatch) -> None:
+    web = TestClient(create_app(lambda: FakeMailbox(capabilities=_GMAIL_CAPS)), base_url="http://127.0.0.1:8765")
+    web.post("/api/config", json={"provider": "gmail", "google_client_id": "cid", "google_client_secret": "sec"})
+    web.post("/api/auth/google/start", json={})
+    cb = web.get("/api/auth/google/callback?code=CODE&state=WRONG")
+    assert cb.status_code == 400 and "did not match" in cb.text
+    assert web.get("/api/config").json()["token_set"] is False
+
+
 def test_config_switch_provider_clears_token_and_reports_capabilities(client: TestClient) -> None:
     client.post("/api/config", json={"token": "secret-abc"})
     switched = client.post("/api/config", json={"provider": "gmail"}).json()

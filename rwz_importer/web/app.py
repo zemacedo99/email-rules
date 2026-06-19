@@ -13,6 +13,7 @@ logged or put in a URL. :func:`run` refuses any non-loopback bind.
 
 from __future__ import annotations
 
+import html
 import os
 import tempfile
 import time
@@ -27,7 +28,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
-from rwz_importer import auth, service
+from rwz_importer import auth, auth_google, service
 from rwz_importer.api import registry
 from rwz_importer.api.errors import MailboxApiError
 from rwz_importer.api.provider import MailboxProvider
@@ -65,9 +66,17 @@ class _Config:
         # Pending device-code sign-in, if one is in flight. Holds the secret
         # device_code + poll settings; never serialised to the browser.
         self.device: dict | None = None
+        # Google OAuth (full "Sign in with Google"): the user's own Desktop-app client
+        # creds, a refresh token, the access-token expiry, and any in-flight PKCE state.
+        # Secrets live here only; never serialised to the browser.
+        self.google_client_id: str | None = os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or None
+        self.google_client_secret: str | None = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or None
+        self.google_refresh_token: str | None = None
+        self.google_expiry: float = 0.0
+        self.google_pending: dict | None = None
 
     def public_view(self) -> dict:
-        """Config safe to send to the browser — the token value is never included."""
+        """Config safe to send to the browser — secrets (token, client secret) are never included."""
         info = registry.provider_info(self.provider)
         return {
             "token_set": bool(self.token),
@@ -76,6 +85,8 @@ class _Config:
             "base_url": self.base_url or info["default_base_url"],
             "capabilities": info["capabilities"],
             "providers": registry.all_provider_info(),
+            # Whether a Google OAuth client is configured (booleans only, never the values).
+            "google_client_set": bool(self.google_client_id and self.google_client_secret),
         }
 
 
@@ -83,8 +94,29 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
     """Build the Starlette app. ``client_factory`` overrides how a provider is made."""
     config = _Config()
 
+    def _maybe_refresh_google() -> None:
+        """Refresh an expired Gmail access token from the stored refresh token, if any."""
+        if config.provider != "gmail" or not config.google_refresh_token:
+            return
+        if config.google_expiry and time.time() < config.google_expiry - 60:
+            return  # still valid
+        if not (config.google_client_id and config.google_client_secret):
+            return
+        try:
+            out = auth_google.refresh_access_token(
+                client_id=config.google_client_id,
+                client_secret=config.google_client_secret,
+                refresh_token=config.google_refresh_token,
+            )
+            config.token = out["access_token"]
+            config.google_expiry = time.time() + int(out.get("expires_in", 3600))
+        except auth_google.GoogleAuthError:
+            # Leave the (stale) token in place; the API call will 401 and surface clearly.
+            pass
+
     if client_factory is None:
         def client_factory() -> MailboxProvider:  # default: real provider via the registry
+            _maybe_refresh_google()
             if not config.token:
                 raise _NeedsToken("No token set. Connect an account in the Connection panel first.")
             return registry.build_provider(
@@ -137,14 +169,24 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
                 config.base_url = None
                 config.mailbox = None
                 config.device = None
+                config.google_refresh_token = None
+                config.google_expiry = 0.0
+                config.google_pending = None
         if body.get("clear_token"):
             config.token = None
+            config.google_refresh_token = None
+            config.google_expiry = 0.0
+            config.google_pending = None  # cancel any in-flight sign-in so it can't re-set a token
         elif body.get("token"):
             config.token = str(body["token"]).strip()
         if "mailbox" in body:
             config.mailbox = (body.get("mailbox") or "").strip() or None
         if "base_url" in body:
             config.base_url = str(body.get("base_url") or "").strip() or None
+        if "google_client_id" in body:
+            config.google_client_id = (body.get("google_client_id") or "").strip() or None
+        if "google_client_secret" in body:
+            config.google_client_secret = (body.get("google_client_secret") or "").strip() or None
         return JSONResponse(config.public_view())
 
     # -- sign in with Microsoft (device code; token stays in memory) ------------
@@ -224,6 +266,86 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
     async def post_auth_cancel(request: Request) -> Response:
         config.device = None
         return JSONResponse({"status": "cancelled"})
+
+    # -- sign in with Google (loopback OAuth; redirects back to this server) -----
+    async def post_auth_google_start(request: Request) -> Response:
+        if config.provider != "gmail":
+            return JSONResponse(
+                {"error": "Select Gmail before signing in with Google."}, status_code=400
+            )
+        if not (config.google_client_id and config.google_client_secret):
+            return JSONResponse(
+                {"error": "Add your Google OAuth client id and secret first (Connection panel)."},
+                status_code=400,
+            )
+        # The redirect carries the authorization code, so it must come back to loopback.
+        # We bind loopback-only and don't trust forwarded headers, but guard anyway so a
+        # spoofed Host header can't make us send the code to a non-loopback origin.
+        if (request.url.hostname or "") not in {"127.0.0.1", "localhost", "::1"}:
+            return JSONResponse(
+                {"error": "Google sign-in must be started over loopback (127.0.0.1)."},
+                status_code=400,
+            )
+        verifier, challenge = auth_google.make_pkce()
+        state = auth_google.new_state()
+        # Redirect back to THIS server (loopback) — works with a Desktop OAuth client.
+        redirect_uri = str(request.base_url) + "api/auth/google/callback"
+        config.google_pending = {"verifier": verifier, "state": state, "redirect_uri": redirect_uri}
+        auth_url = auth_google.build_auth_url(
+            client_id=config.google_client_id, redirect_uri=redirect_uri,
+            challenge=challenge, state=state,
+        )
+        return JSONResponse({"auth_url": auth_url})
+
+    async def get_auth_google_callback(request: Request) -> Response:
+        """Where Google redirects after consent — exchanges the code, stores the token."""
+        params = request.query_params
+        pending = config.google_pending
+        page = (
+            "<html><body style='font-family:sans-serif;max-width:30rem;margin:3rem auto'>"
+            "<h2>{title}</h2><p>{msg}</p>"
+            "<p>You can close this tab and return to Email Rule Manager.</p></body></html>"
+        )
+
+        def done(title: str, msg: str, status: int = 200) -> Response:
+            # Escape every dynamic value (e.g. Google's ``error`` param) — this page is
+            # served on the loopback origin that holds the token, so an unescaped reflect
+            # would be XSS. A strict CSP blocks scripts as defence in depth.
+            body = page.format(title=html.escape(title), msg=html.escape(msg))
+            return Response(
+                body,
+                media_type="text/html",
+                status_code=status,
+                headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"},
+            )
+
+        if params.get("error"):
+            return done("Sign-in cancelled", f"Google reported: {params.get('error')}.", 400)
+        if not pending or params.get("state") != pending.get("state"):
+            return done("Sign-in failed", "The sign-in state did not match. Please start again.", 400)
+        code = params.get("code")
+        if not code:
+            return done("Sign-in failed", "No authorization code was returned.", 400)
+        try:
+            tokens = await run_in_threadpool(
+                lambda: auth_google.exchange_code(
+                    client_id=config.google_client_id,
+                    client_secret=config.google_client_secret,
+                    code=code, verifier=pending["verifier"], redirect_uri=pending["redirect_uri"],
+                )
+            )
+        except auth_google.GoogleAuthError as exc:
+            config.google_pending = None
+            return done("Sign-in failed", str(exc), 400)
+        config.token = tokens["access_token"]
+        config.google_refresh_token = tokens.get("refresh_token") or config.google_refresh_token
+        config.google_expiry = time.time() + int(tokens.get("expires_in", 3600))
+        config.google_pending = None
+        return done("Signed in", "Your Gmail account is connected.")
+
+    async def get_auth_google_status(request: Request) -> Response:
+        # Lets the page poll for completion after opening the consent tab.
+        return JSONResponse({"token_set": bool(config.token), "pending": bool(config.google_pending)})
 
     # -- rules CRUD -------------------------------------------------------------
     async def get_rules(request: Request) -> Response:
@@ -373,6 +495,9 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
         Route("/api/auth/start", post_auth_start, methods=["POST"]),
         Route("/api/auth/poll", post_auth_poll, methods=["POST"]),
         Route("/api/auth/cancel", post_auth_cancel, methods=["POST"]),
+        Route("/api/auth/google/start", post_auth_google_start, methods=["POST"]),
+        Route("/api/auth/google/callback", get_auth_google_callback, methods=["GET"]),
+        Route("/api/auth/google/status", get_auth_google_status, methods=["GET"]),
         Route("/api/rules", get_rules, methods=["GET"]),
         Route("/api/rules", post_rules, methods=["POST"]),
         Route("/api/rules/{rule_id}", rules_item, methods=["PUT", "DELETE"]),

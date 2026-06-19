@@ -419,48 +419,84 @@ def token_help() -> None:
 
 # --------------------------------------------------------------------- login --
 @cli.command()
-@click.option("--tenant", default=None, help="AAD tenant (default: common, or $OWA_OAUTH_TENANT).")
-@click.option("--client-id", default=None, help="Override the OAuth client id ($OWA_OAUTH_CLIENT_ID).")
+@click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
+              help="Which provider to sign in to: outlook (Microsoft) or gmail (Google).")
+@click.option("--tenant", default=None, help="AAD tenant (Outlook; default: common, or $OWA_OAUTH_TENANT).")
+@click.option("--client-id", default=None,
+              help="OAuth client id (Outlook: $OWA_OAUTH_CLIENT_ID; Gmail: $GOOGLE_OAUTH_CLIENT_ID).")
+@click.option("--client-secret", default=None,
+              help="OAuth client secret (Gmail Desktop client; $GOOGLE_OAUTH_CLIENT_SECRET).")
 @click.option("--export/--no-export", "show_export", default=True, show_default=True,
-              help="Also print a ready-to-paste OWA_TOKEN line.")
-def login(tenant: str | None, client_id: str | None, show_export: bool) -> None:
-    """Sign in with Microsoft (device code) and print an OWA token. Nothing is stored.
+              help="Also print a ready-to-paste MAIL_TOKEN line.")
+def login(
+    provider: str,
+    tenant: str | None,
+    client_id: str | None,
+    client_secret: str | None,
+    show_export: bool,
+) -> None:
+    """Sign in (Microsoft device-code or Google OAuth) and print an access token.
 
-    Opens no browser itself: it prints a short code and a URL, you sign in there as
-    usual (MFA included), and the token is printed when you're done. The token lives
-    only in your shell after you export it; this tool never writes it to disk.
+    Nothing is stored: the token lives only in your shell after you export it. Outlook
+    uses the device-code flow (a short code + URL); Gmail opens your browser for Google's
+    consent screen and captures the redirect on a local loopback port (needs your own
+    Desktop OAuth client id + secret).
     """
-    from rwz_importer import auth
+    from rwz_importer import auth, auth_google
 
-    def prompt(info: dict) -> None:
-        url = info.get("verification_uri") or "https://microsoft.com/devicelogin"
-        click.echo("")
-        click.echo("To sign in, open this page in a browser:")
-        click.echo(f"    {url}")
-        click.echo(f"and enter the code:  {info.get('user_code', '')}")
-        click.echo("")
-        click.echo("Waiting for you to finish signing in...  (Ctrl+C to cancel)")
+    canon = registry.canonical_provider(provider)
+    if canon == "gmail":
+        try:
+            cid, secret = auth_google.credentials(client_id, client_secret)
+        except auth_google.GoogleAuthError as exc:
+            raise click.UsageError(str(exc)) from exc
 
-    try:
-        token = auth.acquire_token(on_prompt=prompt, tenant=tenant, client_id=client_id)
-    except auth.AuthError as exc:
-        raise click.UsageError(
-            f"{exc}\n\nIf your organisation blocks device-code sign-in, use "
-            "`rwz-importer token-help` for the manual (Network tab) method."
-        ) from exc
-    except KeyboardInterrupt:  # pragma: no cover - interactive
-        raise click.Abort() from None
+        def gprompt(url: str) -> None:
+            click.echo("\nOpening your browser to sign in with Google. If it doesn't open, visit:")
+            click.echo(f"    {url}")
+            click.echo("\nWaiting for you to finish signing in...  (Ctrl+C to cancel)")
 
-    click.echo("")
-    click.echo("Signed in. OWA token (valid ~1 hour):")
+        try:
+            tokens = auth_google.run_loopback_flow(
+                client_id=cid, client_secret=secret, on_prompt=gprompt
+            )
+        except auth_google.GoogleAuthError as exc:
+            raise click.UsageError(str(exc)) from exc
+        except KeyboardInterrupt:  # pragma: no cover - interactive
+            raise click.Abort() from None
+        token = tokens["access_token"]
+        click.echo("\nSigned in with Google. Access token (valid ~1 hour):")
+    else:
+        def prompt(info: dict) -> None:
+            url = info.get("verification_uri") or "https://microsoft.com/devicelogin"
+            click.echo("")
+            click.echo("To sign in, open this page in a browser:")
+            click.echo(f"    {url}")
+            click.echo(f"and enter the code:  {info.get('user_code', '')}")
+            click.echo("")
+            click.echo("Waiting for you to finish signing in...  (Ctrl+C to cancel)")
+
+        try:
+            token = auth.acquire_token(on_prompt=prompt, tenant=tenant, client_id=client_id)
+        except auth.AuthError as exc:
+            raise click.UsageError(
+                f"{exc}\n\nIf your organisation blocks device-code sign-in, use "
+                "`rwz-importer token-help` for the manual (Network tab) method."
+            ) from exc
+        except KeyboardInterrupt:  # pragma: no cover - interactive
+            raise click.Abort() from None
+        click.echo("\nSigned in. OWA token (valid ~1 hour):")
+
     click.echo("")
     click.echo(token)
     if show_export:
         click.echo("")
         click.echo("Use it with this tool — PowerShell:")
-        click.echo(f'    $env:OWA_TOKEN = "{token}"')
+        click.echo(f'    $env:MAIL_TOKEN = "{token}"')
         click.echo("bash / zsh:")
-        click.echo(f'    export OWA_TOKEN="{token}"')
+        click.echo(f'    export MAIL_TOKEN="{token}"')
+        if canon == "gmail":
+            click.echo("(Add --provider gmail to apply/validate/report/suggest.)")
 
 
 # --------------------------------------------------------------------- web --

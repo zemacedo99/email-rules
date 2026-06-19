@@ -416,6 +416,27 @@
               automatically — no DevTools needed.</span>
           </div>
 
+          <!-- Gmail only: full Google OAuth (needs the user's own Desktop OAuth client) -->
+          <div id="gmailSignin" class="hidden" style="margin-top:14px">
+            <p class="hint" style="margin:0 0 8px">Persistent sign-in needs your own Google OAuth
+              client (type <b>Desktop app</b>, Gmail API enabled). Paste its id &amp; secret, then
+              sign in — you'll get a refresh token so the session survives token expiry.</p>
+            <div class="row">
+              <div>
+                <label for="gClientId">Google client ID</label>
+                <input id="gClientId" type="text" placeholder="…apps.googleusercontent.com" autocomplete="off" />
+              </div>
+              <div>
+                <label for="gClientSecret">Google client secret</label>
+                <input id="gClientSecret" type="password" placeholder="GOCSPX-…" autocomplete="off" />
+              </div>
+            </div>
+            <div class="signin" style="margin-top:12px">
+              <button class="primary" id="gSignInBtn">Sign in with Google</button>
+              <span class="muted">Opens Google's consent page and captures the token automatically.</span>
+            </div>
+          </div>
+
           <details class="advanced" id="manualBox">
             <summary id="manualSummary">Paste an access token manually</summary>
 
@@ -440,8 +461,8 @@
 
             <!-- Gmail help -->
             <div id="gmailHelp" class="hidden">
-              <p class="hint" style="margin:8px 0 6px">Get a short-lived Google OAuth access token and paste it
-                below. A persistent <b>Sign in with Google</b> is coming soon; for now the
+              <p class="hint" style="margin:8px 0 6px">Prefer not to set up an OAuth client? Paste a
+                short-lived Google access token instead. The
                 <a class="plain" href="https://developers.google.com/oauthplayground/" target="_blank" rel="noopener"><b>OAuth&nbsp;Playground ↗</b></a>
                 is the quickest source:</p>
               <ol class="steps">
@@ -561,9 +582,11 @@ function applyProviderUI() {
       .join("");
   }
   const isOutlook = currentProvider === "outlook";
+  const isGmail = currentProvider === "gmail";
   if ($("msSignin")) $("msSignin").classList.toggle("hidden", !isOutlook);
+  if ($("gmailSignin")) $("gmailSignin").classList.toggle("hidden", !isGmail);
   if ($("outlookHelp")) $("outlookHelp").classList.toggle("hidden", !isOutlook);
-  if ($("gmailHelp")) $("gmailHelp").classList.toggle("hidden", isOutlook);
+  if ($("gmailHelp")) $("gmailHelp").classList.toggle("hidden", !isGmail);
 }
 function applyConfig(c) {
   caps = c.capabilities || {};
@@ -627,6 +650,33 @@ async function clearToken() {
 /* ---- sign in with Microsoft (device-code flow) ----------------------------- */
 let authStop = null;                       // set while a sign-in is in flight
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ---- sign in with Google (loopback OAuth; redirects back to this server) --- */
+async function signInGoogle() {
+  const cid = $("gClientId").value.trim();
+  const sec = $("gClientSecret").value.trim();
+  if (!cid || !sec) { toast("Enter your Google client ID and secret first.", "bad"); return; }
+  try {
+    await api("POST", "/api/config", { google_client_id: cid, google_client_secret: sec });
+    const start = await api("POST", "/api/auth/google/start", {});
+    const win = window.open(start.auth_url, "_blank", "noopener");
+    if (!win) toast("Allow pop-ups for this page, then click Sign in with Google again.", "bad");
+    else toast("Finish signing in in the new tab…", "good");
+    const deadline = Date.now() + 300000;       // 5 min
+    while (Date.now() < deadline) {
+      await sleep(2000);
+      let st;
+      try { st = await api("GET", "/api/auth/google/status"); } catch (e) { continue; }
+      if (st.token_set) {
+        const c = await loadConfig();
+        toast("Signed in with Google.", "good");
+        if (c.token_set) { showView("rules"); await refreshFolders().catch(() => {}); await refreshRules().catch(() => {}); }
+        return;
+      }
+    }
+    toast("Sign-in timed out. Try again.", "bad");
+  } catch (e) { toast(e.message, "bad"); }
+}
 
 async function signIn() {
   let start;
@@ -1026,6 +1076,7 @@ $("sgAll").onchange = () => { $("sgTop").disabled = $("sgAll").checked; };
 window.addEventListener("resize", setHeaderVar);
 narrowMq.addEventListener("change", applyResponsiveDefault);   // reset sidebar mode when crossing the breakpoint
 $("signInBtn").onclick = () => signIn();
+$("gSignInBtn").onclick = () => signInGoogle();
 $("providerSelect").onchange = () => changeProvider($("providerSelect").value);
 $("tokenSnippet").textContent = TOKEN_SNIPPET;
 $("copySnippet").onclick = () => {
