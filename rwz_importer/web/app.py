@@ -2,9 +2,9 @@
 
 ``create_app(client_factory)`` is the testable seam: the factory returns a
 :class:`~rwz_importer.api.provider.MailboxProvider`. In production the default
-factory builds an :class:`~rwz_importer.api.owa_client.OwaClient` from the token
-held in memory; tests inject a fake. Endpoints map one-to-one onto
-:mod:`rwz_importer.service`.
+factory builds the configured provider via :mod:`rwz_importer.api.registry`
+(Outlook or Gmail) from the token held in memory; tests inject a fake. Endpoints
+map one-to-one onto :mod:`rwz_importer.service`.
 
 Security posture: the bearer token is kept in process memory only (optionally
 seeded from ``OWA_TOKEN``), never persisted, never returned to the client, never
@@ -28,7 +28,8 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from rwz_importer import auth, service
-from rwz_importer.api.owa_client import DEFAULT_BASE_URL, OwaApiError, OwaClient
+from rwz_importer.api import registry
+from rwz_importer.api.errors import MailboxApiError
 from rwz_importer.api.provider import MailboxProvider
 
 _INDEX_HTML = Path(__file__).parent / "index.html"
@@ -40,23 +41,41 @@ class _NeedsToken(RuntimeError):
     """Raised when a live operation is attempted before a token is configured."""
 
 
+def _initial_provider() -> str:
+    env = os.environ.get("MAIL_PROVIDER") or os.environ.get("OWA_PROVIDER")
+    try:
+        return registry.canonical_provider(env or registry.DEFAULT_PROVIDER)
+    except ValueError:
+        return registry.DEFAULT_PROVIDER
+
+
 class _Config:
     """In-memory server config. The token never leaves this process's memory."""
 
     def __init__(self) -> None:
-        self.token: str | None = os.environ.get("OWA_TOKEN") or None
+        self.provider: str = _initial_provider()
+        self.token: str | None = (
+            os.environ.get("MAIL_TOKEN") or os.environ.get("OWA_TOKEN") or None
+        )
         self.mailbox: str | None = None
-        self.base_url: str = os.environ.get("OWA_BASE_URL") or DEFAULT_BASE_URL
+        # None means "use the selected provider's default endpoint" (registry fills it in).
+        self.base_url: str | None = (
+            os.environ.get("MAIL_BASE_URL") or os.environ.get("OWA_BASE_URL") or None
+        )
         # Pending device-code sign-in, if one is in flight. Holds the secret
         # device_code + poll settings; never serialised to the browser.
         self.device: dict | None = None
 
     def public_view(self) -> dict:
         """Config safe to send to the browser — the token value is never included."""
+        info = registry.provider_info(self.provider)
         return {
             "token_set": bool(self.token),
             "mailbox": self.mailbox,
-            "base_url": self.base_url,
+            "provider": self.provider,
+            "base_url": self.base_url or info["default_base_url"],
+            "capabilities": info["capabilities"],
+            "providers": registry.all_provider_info(),
         }
 
 
@@ -65,10 +84,12 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
     config = _Config()
 
     if client_factory is None:
-        def client_factory() -> MailboxProvider:  # default: real OWA client
+        def client_factory() -> MailboxProvider:  # default: real provider via the registry
             if not config.token:
-                raise _NeedsToken("No OWA token set. Add one in the Setup panel first.")
-            return OwaClient(config.token, base_url=config.base_url)
+                raise _NeedsToken("No token set. Connect an account in the Connection panel first.")
+            return registry.build_provider(
+                config.provider, {"token": config.token, "base_url": config.base_url}
+            )
 
     @contextmanager
     def provider() -> Iterator[MailboxProvider]:
@@ -88,7 +109,7 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
             return JSONResponse({"error": str(exc), "needs_token": True}, status_code=400)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        except OwaApiError as exc:
+        except MailboxApiError as exc:
             return JSONResponse(
                 {"error": str(exc), "status": exc.status}, status_code=502
             )
@@ -104,14 +125,26 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
 
     async def post_config(request: Request) -> Response:
         body = await _body(request)
+        if body.get("provider"):
+            try:
+                new_provider = registry.canonical_provider(str(body["provider"]))
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if new_provider != config.provider:
+                # A token/endpoint/mailbox is provider-specific — switching invalidates them.
+                config.provider = new_provider
+                config.token = None
+                config.base_url = None
+                config.mailbox = None
+                config.device = None
         if body.get("clear_token"):
             config.token = None
         elif body.get("token"):
             config.token = str(body["token"]).strip()
         if "mailbox" in body:
             config.mailbox = (body.get("mailbox") or "").strip() or None
-        if body.get("base_url"):
-            config.base_url = str(body["base_url"]).strip()
+        if "base_url" in body:
+            config.base_url = str(body.get("base_url") or "").strip() or None
         return JSONResponse(config.public_view())
 
     # -- sign in with Microsoft (device code; token stays in memory) ------------
@@ -211,6 +244,7 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
                     move_to_folder=body.get("move_to_folder"),
                     stop_processing=bool(body.get("stop_processing", True)),
                     enabled=bool(body.get("enabled", True)),
+                    archive=bool(body.get("archive", True)),
                 )
 
         return await _run(job)
@@ -236,6 +270,8 @@ def create_app(client_factory: ProviderFactory | None = None) -> Starlette:
                     move_to_folder=body.get("move_to_folder"),
                     stop_processing=bool(body.get("stop_processing", True)),
                     enabled=bool(body.get("enabled", True)),
+                    # Omitted -> inherit the existing rule's archive (never silently flip it).
+                    archive=bool(body["archive"]) if "archive" in body else None,
                 )
 
         return await _run(job)
@@ -409,7 +445,7 @@ def run(host: str = "127.0.0.1", port: int = 8765) -> None:
     """Serve the UI on loopback. Refuses any non-loopback host (it holds a token)."""
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise SystemExit(
-            f"Refusing to bind to {host!r}: this server holds your OWA token and "
+            f"Refusing to bind to {host!r}: this server holds your mailbox token and "
             "must stay on loopback. Use 127.0.0.1."
         )
     import uvicorn

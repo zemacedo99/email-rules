@@ -23,19 +23,33 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from rwz_importer.api.capabilities import ProviderCapabilities
+from rwz_importer.api.errors import MailboxApiError
+
 logger = logging.getLogger("rwz_importer.api")
 
 DEFAULT_BASE_URL = "https://outlook.office.com/api/v2.0/me/"
 _MAX_RETRIES = 5
 
+# Exchange semantics: ordered rules, stop-processing, folder destinations, and a
+# move that inherently archives (so no separate archive toggle). Exposed as a
+# module constant so callers (e.g. the provider registry / web UI) can read the
+# capabilities without holding a token.
+CAPABILITIES = ProviderCapabilities(
+    ordered_rules=True,
+    stop_processing=True,
+    destination_kind="folder",
+    archive_toggle=False,
+    hierarchical_folders=True,
+)
 
-class OwaApiError(RuntimeError):
-    """An OWA REST call failed. Carries the HTTP status and response body."""
 
-    def __init__(self, message: str, *, status: int | None = None, body: str | None = None):
-        super().__init__(message)
-        self.status = status
-        self.body = body
+class OwaApiError(MailboxApiError):
+    """An OWA REST call failed. Carries the HTTP status and response body.
+
+    Subclasses the provider-neutral :class:`MailboxApiError` so callers may catch
+    either; ``except OwaApiError`` keeps working for OWA-specific handling.
+    """
 
 
 @dataclass
@@ -51,6 +65,10 @@ class ExistingRule:
     sender_contains: list[str] = field(default_factory=list)
     move_to_folder_id: str | None = None
     stop_processing: bool = True
+    # On Exchange a move always removes the message from the inbox, so "archive" is
+    # implied and constant; the field exists so providers like Gmail (where applying
+    # a label and archiving are independent) can express it through the same model.
+    archive: bool = True
 
     @classmethod
     def from_api(cls, d: dict) -> "ExistingRule":
@@ -162,6 +180,11 @@ class OwaClient:
     def close(self) -> None:
         self._client.close()
 
+    # --------------------------------------------------------- Capabilities --
+    def capabilities(self) -> ProviderCapabilities:
+        """Exchange semantics: ordered rules, stop-processing, folders, no archive toggle."""
+        return CAPABILITIES
+
     # ----------------------------------------------------------------- HTTP --
     def _request(self, method: str, url: str, *, json: dict | None = None) -> httpx.Response:
         """Issue one request, retrying on 429 (honouring ``Retry-After``)."""
@@ -250,8 +273,13 @@ class OwaClient:
         sender_contains: list[str] | None = None,
         stop_processing: bool = True,
         enabled: bool = True,
+        archive: bool = True,
     ) -> ExistingRule:
-        """Create an inbox message rule. Rejects ``Sequence < 1`` before any HTTP call."""
+        """Create an inbox message rule. Rejects ``Sequence < 1`` before any HTTP call.
+
+        ``archive`` is accepted for cross-provider symmetry but ignored here: an
+        Exchange ``MoveToFolder`` action inherently removes the message from the inbox.
+        """
         if sequence is None or sequence < 1:
             raise ValueError(
                 f"Sequence must be >= 1 (Exchange requirement), got {sequence!r}."

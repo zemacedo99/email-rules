@@ -34,7 +34,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from rwz_importer import service
-from rwz_importer.api.owa_client import DEFAULT_BASE_URL, OwaApiError, OwaClient
+from rwz_importer.api import registry
+from rwz_importer.api.errors import MailboxApiError
+from rwz_importer.api.provider import MailboxProvider
 
 _INSTRUCTIONS = """\
 Tools for managing Outlook Web (OWA) inbox rules.
@@ -60,36 +62,44 @@ _WRITE = ToolAnnotations(
 
 
 # --------------------------------------------------------------- client setup --
-def _make_client() -> OwaClient:
-    token = os.environ.get("OWA_TOKEN")
+def _make_client() -> MailboxProvider:
+    """Build the configured provider from env: MAIL_PROVIDER + MAIL_TOKEN (or OWA_*)."""
+    provider = (
+        os.environ.get("MAIL_PROVIDER") or os.environ.get("OWA_PROVIDER") or registry.DEFAULT_PROVIDER
+    )
+    token = os.environ.get("MAIL_TOKEN") or os.environ.get("OWA_TOKEN")
     if not token:
         raise RuntimeError(
-            "OWA_TOKEN is not set. Set it in this MCP server's environment "
-            "(the `env` block of the server config) — never paste a token into "
-            "chat. See the token_help tool for how to obtain one."
+            "No mailbox token is set. Set MAIL_TOKEN (or OWA_TOKEN) in this MCP "
+            "server's environment (the `env` block of the server config) — never "
+            "paste a token into chat. See the token_help tool for how to obtain one. "
+            "Set MAIL_PROVIDER=gmail to target Gmail."
         )
-    return OwaClient(token, base_url=os.environ.get("OWA_BASE_URL", DEFAULT_BASE_URL))
+    base_url = os.environ.get("MAIL_BASE_URL") or os.environ.get("OWA_BASE_URL")
+    return registry.build_provider(provider, {"token": token, "base_url": base_url})
 
 
 @contextmanager
-def _client() -> Iterator[OwaClient]:
-    """Yield a live OWA client, mapping API errors to actionable messages."""
+def _client() -> Iterator[MailboxProvider]:
+    """Yield a live provider, mapping API errors to actionable messages."""
     client = _make_client()
     try:
         yield client
-    except OwaApiError as exc:
+    except MailboxApiError as exc:
         raise RuntimeError(_format_api_error(exc)) from exc
     finally:
-        client.close()
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
 
-def _format_api_error(exc: OwaApiError) -> str:
+def _format_api_error(exc: MailboxApiError) -> str:
     msg = str(exc)
     if exc.status in (401, 403):
         msg += (
-            " — the token was rejected. It may be expired (OWA tokens last ~1h) or "
-            "scoped for graph.microsoft.com instead of outlook.office.com. Use the "
-            "token_help tool for how to get a fresh one."
+            " — the token was rejected. It may be expired (mailbox tokens are "
+            "short-lived) or missing the required scope. Use the token_help tool for "
+            "how to get a fresh one."
         )
     return msg
 

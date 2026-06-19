@@ -72,13 +72,19 @@ class Condition:
 
 @dataclass
 class Action:
+    # ``moveToFolder`` is the destination — a folder name on Exchange/IMAP, a label
+    # name on Gmail. ``archive`` (remove from Inbox) is implied by a move on
+    # Exchange/IMAP and only an independent choice on Gmail; it defaults True so a
+    # parsed .rwz "move" stays a faithful move everywhere.
     moveToFolder: str | None = None
     stopProcessingRules: bool = True
+    archive: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "moveToFolder": self.moveToFolder,
             "stopProcessingRules": self.stopProcessingRules,
+            "archive": self.archive,
         }
 
     @classmethod
@@ -87,6 +93,7 @@ class Action:
         return cls(
             moveToFolder=d.get("moveToFolder"),
             stopProcessingRules=bool(d.get("stopProcessingRules", True)),
+            archive=bool(d.get("archive", True)),
         )
 
 

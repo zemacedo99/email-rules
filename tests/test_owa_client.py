@@ -213,3 +213,19 @@ def test_owaclient_satisfies_provider() -> None:
 
     with _client(handler) as client:
         assert isinstance(client, MailboxProvider)
+
+
+def test_capabilities_reports_exchange_baseline() -> None:
+    """OWA is the ordered, stop-processing, folder-based, archive-implied baseline."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": []})
+
+    with _client(handler) as client:
+        caps = client.capabilities()
+
+    assert caps.ordered_rules is True
+    assert caps.stop_processing is True
+    assert caps.destination_kind == "folder"
+    assert caps.archive_toggle is False  # a move already removes from the inbox
+    assert caps.hierarchical_folders is True

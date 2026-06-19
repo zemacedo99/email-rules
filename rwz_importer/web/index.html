@@ -273,7 +273,7 @@
     <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 13V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/><path d="m15.5 19 2 2 4-4"/></svg></span>
     <div>
       <h1>Email Rule Manager</h1>
-      <div class="sub">New Outlook / Outlook-on-the-web inbox rules</div>
+      <div class="sub">Server-side inbox rules for Outlook &amp; Gmail</div>
     </div>
   </div>
   <span id="connPill" class="pill">no token</span>
@@ -379,23 +379,18 @@
       <div id="disconnectedPanel">
         <section class="card">
           <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>What this is</h2>
-          <p class="hint">Manage your New Outlook / Outlook-on-the-web inbox rules: review and edit
-            them, run them over the mail already in your inbox, get rule suggestions from your
-            recent mail, and import an Outlook Classic <code>.rwz</code> export.</p>
+          <p class="hint">Manage your server-side inbox rules — on <b>Outlook/Exchange</b> or
+            <b>Gmail</b>: review and edit them, run them over the mail already in your inbox, get
+            rule suggestions from your recent mail, and import an Outlook Classic
+            <code>.rwz</code> export.</p>
 
-          <h3>Connecting your mailbox</h3>
-          <p class="hint" style="margin:0 0 8px">Two ways — pick one below:</p>
-          <ol class="steps">
-            <li><b>Sign in with Microsoft (easiest).</b> Click the <b>Sign in with Microsoft</b>
-              button, open the page it shows, type the short code, and finish signing in as
-              usual. The token is captured automatically — no DevTools, no copy/paste.</li>
-            <li><b>Paste a token manually.</b> Use this if your organisation blocks the button
-              above (some do). There's a one-click <i>console snippet</i> that grabs the
-              token from a tab you're already signed in to — no Network-tab hunting.</li>
-          </ol>
-          <p class="hint" style="margin:8px 0 0">Either way, the token is held in this server's
-            memory only — never written to disk, never shown back here, never sent anywhere but
-            Microsoft. It expires after about an hour; just sign in again.</p>
+          <h3>Connecting your account</h3>
+          <p class="hint" style="margin:0 0 8px">Choose your provider and connect in the
+            <b>Connect your account</b> panel below. Outlook offers one-click sign-in; either
+            provider also accepts a pasted access token.</p>
+          <p class="hint" style="margin:8px 0 0">The token is held in this server's
+            memory only — never written to disk, never shown back here. It is short-lived
+            (about an hour); just connect again when it expires.</p>
 
           <div class="note">
             <b>Safe by default.</b> Running rules over your inbox always shows a preview with a
@@ -407,47 +402,71 @@
         </section>
 
         <section class="card">
-          <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>Connect your mailbox</h2>
+          <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>Connect your account</h2>
           <p class="hint">The token stays in this server's memory only —
             never written to disk, never shown back here.</p>
 
-          <div class="signin">
+          <label for="providerSelect">Email provider</label>
+          <select id="providerSelect"></select>
+
+          <!-- Outlook only: one-click device-code sign-in -->
+          <div class="signin" id="msSignin" style="margin-top:14px">
             <button class="primary" id="signInBtn">Sign in with Microsoft</button>
             <span class="muted">Opens a Microsoft sign-in page and captures the token
               automatically — no DevTools needed.</span>
           </div>
 
+          <details class="advanced" id="manualBox">
+            <summary id="manualSummary">Paste an access token manually</summary>
+
+            <!-- Outlook help -->
+            <div id="outlookHelp">
+              <p class="hint" style="margin:8px 0 6px">If <b>Sign in with Microsoft</b> is blocked by your
+                organisation, grab the token from a browser tab that's <i>already</i> signed in to Outlook —
+                that session is allowed, so this always works:</p>
+              <ol class="steps">
+                <li>Open <code>https://outlook.office.com</code> and let your mailbox finish loading.</li>
+                <li>Press <code>F12</code> → <b>Console</b> tab.</li>
+                <li><button class="sm" id="copySnippet">Copy console snippet</button>, paste it at the console
+                  prompt, and press <b>Enter</b>. It finds your Outlook token and copies it to the clipboard.
+                  <span class="muted">(If the console warns about pasting, type <code>allow pasting</code> first.)</span></li>
+                <li>Come back here, paste it below, and click <b>Save</b>.</li>
+              </ol>
+              <pre class="snippet" id="tokenSnippet"></pre>
+              <p class="hint" style="margin:6px 0 0">Alternative: in the <b>Network</b> tab, open any request to
+                <code>…/api/v2.0/me/…</code> and copy the <code>authorization</code> header value after
+                <code>Bearer&nbsp;</code> (it looks like <code class="mono">eyJ0eXAiOiJKV1Q…</code>).</p>
+            </div>
+
+            <!-- Gmail help -->
+            <div id="gmailHelp" class="hidden">
+              <p class="hint" style="margin:8px 0 6px">Get a short-lived Google OAuth access token and paste it
+                below. A persistent <b>Sign in with Google</b> is coming soon; for now the
+                <a class="plain" href="https://developers.google.com/oauthplayground/" target="_blank" rel="noopener"><b>OAuth&nbsp;Playground ↗</b></a>
+                is the quickest source:</p>
+              <ol class="steps">
+                <li>Open the <b>OAuth 2.0 Playground</b> (link above).</li>
+                <li>In <b>Step 1</b>, paste these scopes into the box and click <b>Authorize APIs</b>, then sign in:
+                  <br><code class="mono">https://www.googleapis.com/auth/gmail.settings.basic https://www.googleapis.com/auth/gmail.labels https://www.googleapis.com/auth/gmail.modify</code></li>
+                <li>In <b>Step 2</b>, click <b>Exchange authorization code for tokens</b> and copy the <b>Access token</b>.</li>
+                <li>Paste it below and click <b>Save</b>. (The token lasts about an hour.)</li>
+              </ol>
+            </div>
+
+            <label for="token" id="tokenLabel">Access token</label>
+            <input id="token" type="password" placeholder="paste the token here" autocomplete="off" />
+          </details>
+
           <div class="row" style="margin-top:14px">
             <div>
-              <label for="mailbox">Mailbox (label only)</label>
+              <label for="mailbox">Mailbox / account (label only)</label>
               <input id="mailbox" type="text" placeholder="you@example.com" />
             </div>
             <div>
-              <label for="baseUrl">API base URL</label>
+              <label for="baseUrl">API base URL (advanced)</label>
               <input id="baseUrl" type="text" />
             </div>
           </div>
-
-          <details class="advanced" id="manualBox">
-            <summary>Paste a token manually (use this if sign-in is blocked)</summary>
-            <p class="hint" style="margin:8px 0 6px">If <b>Sign in with Microsoft</b> is blocked by your
-              organisation, grab the token from a browser tab that's <i>already</i> signed in to Outlook —
-              that session is allowed, so this always works:</p>
-            <ol class="steps">
-              <li>Open <code>https://outlook.office.com</code> and let your mailbox finish loading.</li>
-              <li>Press <code>F12</code> → <b>Console</b> tab.</li>
-              <li><button class="sm" id="copySnippet">Copy console snippet</button>, paste it at the console
-                prompt, and press <b>Enter</b>. It finds your Outlook token and copies it to the clipboard.
-                <span class="muted">(If the console warns about pasting, type <code>allow pasting</code> first.)</span></li>
-              <li>Come back here, paste it below, and click <b>Save</b>.</li>
-            </ol>
-            <pre class="snippet" id="tokenSnippet"></pre>
-            <label for="token">OWA bearer token</label>
-            <input id="token" type="password" placeholder="paste the token here" autocomplete="off" />
-            <p class="hint" style="margin:6px 0 0">Alternative: in the <b>Network</b> tab, open any request to
-              <code>…/api/v2.0/me/…</code> and copy the <code>authorization</code> header value after
-              <code>Bearer&nbsp;</code> (it looks like <code class="mono">eyJ0eXAiOiJKV1Q…</code>).</p>
-          </details>
 
           <div class="actions">
             <button class="primary" id="saveConfig">Save</button>
@@ -529,13 +548,46 @@ function splitList(text) {
 /* ---- config ---------------------------------------------------------------- */
 let tokenSet = false;
 let currentMailbox = "";
-async function loadConfig() {
-  const c = await api("GET", "/api/config");
+let caps = {};                 // current provider capabilities (destination_kind, archive_toggle, …)
+let providersInfo = [];        // [{id, label, capabilities, …}] from /api/config
+let currentProvider = "outlook";
+// "folder" on Outlook/IMAP, "label" on Gmail — drives UI wording.
+function destWord() { return caps.destination_kind === "label" ? "label" : "folder"; }
+function applyProviderUI() {
+  const sel = $("providerSelect");
+  if (sel && providersInfo.length) {
+    sel.innerHTML = providersInfo
+      .map((p) => '<option value="' + esc(p.id) + '"' + (p.id === currentProvider ? " selected" : "") + ">" + esc(p.label) + "</option>")
+      .join("");
+  }
+  const isOutlook = currentProvider === "outlook";
+  if ($("msSignin")) $("msSignin").classList.toggle("hidden", !isOutlook);
+  if ($("outlookHelp")) $("outlookHelp").classList.toggle("hidden", !isOutlook);
+  if ($("gmailHelp")) $("gmailHelp").classList.toggle("hidden", isOutlook);
+}
+function applyConfig(c) {
+  caps = c.capabilities || {};
+  providersInfo = c.providers || [];
+  currentProvider = c.provider || "outlook";
   currentMailbox = c.mailbox || "";
   $("mailbox").value = currentMailbox;
   $("baseUrl").value = c.base_url || "";
+  applyProviderUI();
   setConnected(c.token_set);
+}
+async function loadConfig() {
+  const c = await api("GET", "/api/config");
+  applyConfig(c);
   return c;
+}
+async function changeProvider(id) {
+  try {
+    const c = await api("POST", "/api/config", { provider: id });
+    $("token").value = "";
+    applyConfig(c);
+    toast("Switched to " + ((providersInfo.find((p) => p.id === c.provider) || {}).label || c.provider)
+      + ". Connect that account below.", "good");
+  } catch (e) { toast(e.message, "bad"); }
 }
 function setConnected(on) {
   tokenSet = !!on;
@@ -560,8 +612,7 @@ async function saveConfig() {
   if (tok) body.token = tok;
   const c = await api("POST", "/api/config", body);
   $("token").value = "";
-  currentMailbox = c.mailbox || $("mailbox").value || "";
-  setConnected(c.token_set);
+  applyConfig(c);
   toast("Setup saved.", "good");
   if (c.token_set) { showView("rules"); await refreshFolders(); await refreshRules(); }
 }
@@ -659,7 +710,7 @@ function destCell(folderId) {
   if (name) return esc(name);
   // Not in our folder list (just created, or outside the listed tree): show a
   // short placeholder, never the raw id — that long token would break the layout.
-  return '<span class="muted" title="' + esc(folderId) + '">(folder not listed)</span>';
+  return '<span class="muted" title="' + esc(folderId) + '">(' + destWord() + ' not listed)</span>';
 }
 async function refreshRules() {
   const wrap = $("rulesWrap");
@@ -704,6 +755,10 @@ function ruleModal(rule) {
   const editing = !!rule;
   const c = (rule && rule.conditions) || {};
   const destName = rule && rule.move_to_folder_id ? (state.folderById[rule.move_to_folder_id] || "") : "";
+  const word = destWord();                              // "folder" (Outlook) or "label" (Gmail)
+  const showArchive = !!caps.archive_toggle;            // Gmail: label-only vs label+archive
+  const showStop = caps.stop_processing !== false;      // Gmail filters have no stop-processing
+  const archiveChecked = editing ? (rule.archive !== false) : true;
   openModal(
     "<h2>" + (editing ? "Edit rule" : "Add rule") + "</h2>"
     + '<p class="hint">Conditions: one value per line (or comma-separated). A rule with several'
@@ -712,10 +767,17 @@ function ruleModal(rule) {
     + '<label>From addresses (exact)</label><textarea id="m_from">' + esc((c.fromAddresses || []).join("\n")) + "</textarea>"
     + '<label>Subject contains</label><textarea id="m_subj">' + esc((c.subjectContains || []).join("\n")) + "</textarea>"
     + '<label>Sender contains</label><textarea id="m_send">' + esc((c.senderContains || []).join("\n")) + "</textarea>"
-    + '<label>Move matching mail to</label>'
+    + "<label>Move matching mail to " + word + "</label>"
     + '<select id="m_folder">' + folderOptions(destName) + "</select>"
-    + '<input id="m_folder_new" type="text" placeholder="…or type a new folder name" style="margin-top:8px" />'
-    + '<div class="check"><input id="m_stop" type="checkbox" checked /><label for="m_stop">Stop processing further rules</label></div>'
+    + '<input id="m_folder_new" type="text" placeholder="…or type a new ' + word + ' name" style="margin-top:8px" />'
+    + (showArchive
+        ? '<div class="check"><input id="m_archive" type="checkbox" ' + (archiveChecked ? "checked" : "")
+          + ' /><label for="m_archive">Also remove it from the Inbox (archive)</label></div>'
+        : "")
+    + (showStop
+        ? '<div class="check"><input id="m_stop" type="checkbox" ' + (!rule || rule.stop_processing !== false ? "checked" : "")
+          + ' /><label for="m_stop">Stop processing further rules</label></div>'
+        : "")
     + '<div class="check"><input id="m_enabled" type="checkbox" ' + (!rule || rule.enabled ? "checked" : "") + ' /><label for="m_enabled">Enabled</label></div>'
     + '<div class="actions"><button class="primary" id="m_save">' + (editing ? "Save changes" : "Create rule") + "</button>"
     + '<button id="m_cancel">Cancel</button></div>'
@@ -732,9 +794,10 @@ function ruleModal(rule) {
         senderContains: splitList($("m_send").value),
       },
       move_to_folder: moveTo,
-      stop_processing: $("m_stop").checked,
       enabled: $("m_enabled").checked,
     };
+    if ($("m_stop")) body.stop_processing = $("m_stop").checked;
+    if ($("m_archive")) body.archive = $("m_archive").checked;
     try {
       if (editing) await api("PUT", "/api/rules/" + encodeURIComponent(rule.id), body);
       else await api("POST", "/api/rules", body);
@@ -768,9 +831,9 @@ async function runRules(ruleIds, title) {
     + '<p class="summary-line">Sampled <b>' + preview.sampled_messages + "</b> message(s) in "
     + esc(preview.folder) + ".</p>"
     + '<p class="summary-line"><span class="big">' + total + "</span> message(s) would be filed into "
-    + folders.size + " folder(s).</p>";
+    + folders.size + " " + destWord() + "(s).</p>";
   if (preview.skipped_no_folder && preview.skipped_no_folder.length)
-    html += '<p class="hint">Skipped (no destination folder): ' + esc(preview.skipped_no_folder.join(", ")) + "</p>";
+    html += '<p class="hint">Skipped (no destination ' + destWord() + "): " + esc(preview.skipped_no_folder.join(", ")) + "</p>";
 
   const active = (preview.rules || []).filter((r) => r.match_count > 0);
   if (active.length) {
@@ -895,7 +958,7 @@ async function planRwz() {
   state.rwzToken = plan.confirmation_token;
   const s = plan.summary || {};
   let html = '<div class="note">Plan: <b>' + (s.create || 0) + "</b> create · <b>" + (s.replace || 0)
-    + "</b> replace · <b>" + (s.skip || 0) + "</b> skip · <b>" + (s.folders || 0) + "</b> folder(s) to create.</div>";
+    + "</b> replace · <b>" + (s.skip || 0) + "</b> skip · <b>" + (s.folders || 0) + "</b> " + destWord() + "(s) to create.</div>";
   if (plan.skipped_for_review && plan.skipped_for_review.length)
     html += '<p class="hint">Held for review (cross-mailbox): ' + esc(plan.skipped_for_review.join(", ")) + "</p>";
   html += '<div class="tbl"><table><thead><tr><th>Action</th><th>Rule</th><th>Into</th></tr></thead><tbody>';
@@ -911,7 +974,7 @@ async function planRwz() {
   if (writes > 0) $("rwz_apply").onclick = applyRwz;
 }
 async function applyRwz() {
-  if (!confirm("Apply this plan to the mailbox? Folders and rules will be created.")) return;
+  if (!confirm("Apply this plan to the mailbox? " + destWord() + "s and rules will be created.")) return;
   $("rwz_apply").disabled = true; $("rwz_apply").textContent = "Applying…";
   try {
     const out = await api("POST", "/api/rwz/apply", {
@@ -919,7 +982,7 @@ async function applyRwz() {
     });
     if (out.status === "applied") {
       toast("Applied: " + (out.created_rules || []).length + " rule(s), "
-        + (out.created_folders || []).length + " folder(s).", "good");
+        + (out.created_folders || []).length + " " + destWord() + "(s).", "good");
       await refreshFolders(); await refreshRules();
       planRwz();
     } else if (out.status === "confirmation_required") {
@@ -963,6 +1026,7 @@ $("sgAll").onchange = () => { $("sgTop").disabled = $("sgAll").checked; };
 window.addEventListener("resize", setHeaderVar);
 narrowMq.addEventListener("change", applyResponsiveDefault);   // reset sidebar mode when crossing the breakpoint
 $("signInBtn").onclick = () => signIn();
+$("providerSelect").onchange = () => changeProvider($("providerSelect").value);
 $("tokenSnippet").textContent = TOKEN_SNIPPET;
 $("copySnippet").onclick = () => {
   const done = () => toast("Snippet copied — paste it in the console on outlook.office.com.", "good");

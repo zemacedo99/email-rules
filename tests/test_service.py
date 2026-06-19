@@ -12,7 +12,7 @@ import pytest
 
 from rwz_importer import service
 from rwz_importer.api.owa_client import ExistingRule, Folder, Message
-from rwz_importer.api.provider import MailboxProvider
+from rwz_importer.api.provider import MailboxProvider, ProviderCapabilities
 from rwz_importer.models import Action, Condition, Flags, Rule, RuleSet
 
 
@@ -26,16 +26,21 @@ class FakeMailbox:
         folders: list[Folder] | None = None,
         messages: list[Message] | None = None,
         child_folders: dict[str, list[Folder]] | None = None,
+        capabilities: ProviderCapabilities | None = None,
     ) -> None:
         self._rules = list(rules or [])
         self._folders = list(folders or [])
         self._messages = list(messages or [])
         self._child_folders = {k: list(v) for k, v in (child_folders or {}).items()}
+        self._caps = capabilities or ProviderCapabilities()
         self._n = 0
         self.created_folders: list[str] = []
         self.created_rules: list[dict] = []
         self.deleted_rule_ids: list[str] = []
         self.moved_messages: list[tuple[str, str]] = []
+
+    def capabilities(self) -> ProviderCapabilities:
+        return self._caps
 
     # -- reads --
     def list_inbox_folders(self) -> list[Folder]:
@@ -78,6 +83,7 @@ class FakeMailbox:
         sender_contains: list[str] | None = None,
         stop_processing: bool = True,
         enabled: bool = True,
+        archive: bool = True,
     ) -> ExistingRule:
         if sequence < 1:
             raise ValueError("Sequence must be >= 1.")
@@ -92,9 +98,12 @@ class FakeMailbox:
             sender_contains=list(sender_contains or []),
             move_to_folder_id=folder_id,
             stop_processing=stop_processing,
+            archive=archive,
         )
         self._rules.append(rule)
-        self.created_rules.append({"name": display_name, "sequence": sequence})
+        self.created_rules.append(
+            {"name": display_name, "sequence": sequence, "archive": archive}
+        )
         return rule
 
     def delete_rule(self, rule_id: str) -> None:

@@ -20,14 +20,10 @@ from pathlib import Path
 
 import click
 
-from rwz_importer.api.owa_client import (
-    DEFAULT_BASE_URL,
-    ExistingRule,
-    Folder,
-    OwaApiError,
-    OwaClient,
-    normalize_folder_name,
-)
+from rwz_importer.api import registry
+from rwz_importer.api.errors import MailboxApiError
+from rwz_importer.api.owa_client import ExistingRule, Folder, normalize_folder_name
+from rwz_importer.api.provider import MailboxProvider
 from rwz_importer.engine import (
     ActionKind,
     ApplyPlan,
@@ -98,9 +94,9 @@ def parse(rwz_file: Path, output: Path | None, verbose: bool) -> None:
 )
 @click.option(
     "--token",
-    envvar="OWA_TOKEN",
+    envvar=["MAIL_TOKEN", "OWA_TOKEN"],
     default=None,
-    help="OWA bearer token. Read from $OWA_TOKEN if omitted. Never stored.",
+    help="Access token. Read from $MAIL_TOKEN/$OWA_TOKEN if omitted. Never stored.",
 )
 @click.option("--mailbox", default=None, help="Target mailbox address (for reporting only).")
 @click.option(
@@ -128,7 +124,9 @@ def parse(rwz_file: Path, output: Path | None, verbose: bool) -> None:
     help="Preview only (default). Use --no-dry-run (or --yes) to write changes.",
 )
 @click.option("--yes", is_flag=True, help="Apply non-interactively (implies --no-dry-run).")
-@click.option("--base-url", default=DEFAULT_BASE_URL, help="Override the OWA API base URL.")
+@click.option("--base-url", default=None, help="Override the API base URL (default: the provider's).")
+@click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
+              help="Mailbox provider: outlook or gmail.")
 @click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
 @click.option(
     "--logfile",
@@ -146,7 +144,8 @@ def apply(
     normalize_folders: bool,
     dry_run: bool,
     yes: bool,
-    base_url: str,
+    base_url: str | None,
+    provider: str,
     verbose: bool,
     logfile: Path | None,
 ) -> None:
@@ -170,13 +169,13 @@ def apply(
         if not dry_run:
             raise click.UsageError(
                 "apply needs a token to write changes. Pass --token or set "
-                "OWA_TOKEN, or run with --dry-run for an offline preview."
+                "MAIL_TOKEN/OWA_TOKEN, or run with --dry-run for an offline preview."
             )
         _offline_preview(ruleset, excludes, address_map, normalize_folders)
         return
 
     try:
-        with OwaClient(token, base_url=base_url) as client:
+        with registry.build_provider(provider, {"token": token, "base_url": base_url}) as client:
             existing_rules = client.list_rules()
             folders = _all_folders(client)
             folder_names = _folder_name_set(folders)
@@ -216,13 +215,14 @@ def apply(
             for status in result.statuses:
                 mark = "OK  " if status.ok else "FAIL"
                 click.echo(f"  [{mark}] {status.name}: {status.detail}")
-    except OwaApiError as exc:
+    except MailboxApiError as exc:
         raise click.ClickException(_format_api_error(exc)) from exc
 
 
 # ------------------------------------------------------------------ validate --
 @cli.command()
-@click.option("--token", envvar="OWA_TOKEN", default=None, help="OWA bearer token.")
+@click.option("--token", envvar=["MAIL_TOKEN", "OWA_TOKEN"], default=None,
+              help="Access token ($MAIL_TOKEN/$OWA_TOKEN). Never stored.")
 @click.option(
     "--expected",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -231,21 +231,24 @@ def apply(
     help="Parsed rules JSON to validate the live mailbox against.",
 )
 @click.option("--mailbox", default=None, help="Target mailbox address (for reporting only).")
-@click.option("--base-url", default=DEFAULT_BASE_URL, help="Override the OWA API base URL.")
+@click.option("--base-url", default=None, help="Override the API base URL (default: the provider's).")
+@click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
+              help="Mailbox provider: outlook or gmail.")
 @click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
 def validate(
-    token: str | None, expected: Path, mailbox: str | None, base_url: str, verbose: bool
+    token: str | None, expected: Path, mailbox: str | None, base_url: str | None,
+    provider: str, verbose: bool,
 ) -> None:
     """Compare the live mailbox rules against an expected rules JSON."""
     setup_logging(verbose=verbose)
     if not token:
-        raise click.UsageError("validate needs a token. Pass --token or set OWA_TOKEN.")
+        raise click.UsageError("validate needs a token. Pass --token or set MAIL_TOKEN/OWA_TOKEN.")
 
     ruleset = _load_json(expected)
     try:
-        with OwaClient(token, base_url=base_url) as client:
+        with registry.build_provider(provider, {"token": token, "base_url": base_url}) as client:
             live_rules = client.list_rules()
-    except OwaApiError as exc:
+    except MailboxApiError as exc:
         raise click.ClickException(_format_api_error(exc)) from exc
 
     result = validate_state(live_rules, ruleset)
@@ -261,7 +264,8 @@ def validate(
 
 # -------------------------------------------------------------------- report --
 @cli.command()
-@click.option("--token", envvar="OWA_TOKEN", default=None, help="OWA bearer token.")
+@click.option("--token", envvar=["MAIL_TOKEN", "OWA_TOKEN"], default=None,
+              help="Access token ($MAIL_TOKEN/$OWA_TOKEN). Never stored.")
 @click.option(
     "--format",
     "fmt",
@@ -277,26 +281,29 @@ def validate(
     help="Write the report here (otherwise stdout).",
 )
 @click.option("--mailbox", default=None, help="Target mailbox address (for reporting only).")
-@click.option("--base-url", default=DEFAULT_BASE_URL, help="Override the OWA API base URL.")
+@click.option("--base-url", default=None, help="Override the API base URL (default: the provider's).")
+@click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
+              help="Mailbox provider: outlook or gmail.")
 @click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
 def report(
     token: str | None,
     fmt: str,
     output: Path | None,
     mailbox: str | None,
-    base_url: str,
+    base_url: str | None,
+    provider: str,
     verbose: bool,
 ) -> None:
     """Fetch the live mailbox state and render it as Markdown or JSON."""
     setup_logging(verbose=verbose)
     if not token:
-        raise click.UsageError("report needs a token. Pass --token or set OWA_TOKEN.")
+        raise click.UsageError("report needs a token. Pass --token or set MAIL_TOKEN/OWA_TOKEN.")
 
     try:
-        with OwaClient(token, base_url=base_url) as client:
+        with registry.build_provider(provider, {"token": token, "base_url": base_url}) as client:
             rules = client.list_rules()
             folders = _all_folders(client)
-    except OwaApiError as exc:
+    except MailboxApiError as exc:
         raise click.ClickException(_format_api_error(exc)) from exc
 
     if fmt == "json":
@@ -313,7 +320,8 @@ def report(
 
 # ------------------------------------------------------------------- suggest --
 @cli.command()
-@click.option("--token", envvar="OWA_TOKEN", default=None, help="OWA bearer token.")
+@click.option("--token", envvar=["MAIL_TOKEN", "OWA_TOKEN"], default=None,
+              help="Access token ($MAIL_TOKEN/$OWA_TOKEN). Never stored.")
 @click.option("--folder", default="Inbox", show_default=True, help="Folder to sample.")
 @click.option(
     "--top",
@@ -340,7 +348,9 @@ def report(
     default=None,
     help="Write suggestions here (otherwise stdout).",
 )
-@click.option("--base-url", default=DEFAULT_BASE_URL, help="Override the OWA API base URL.")
+@click.option("--base-url", default=None, help="Override the API base URL (default: the provider's).")
+@click.option("--provider", default=registry.DEFAULT_PROVIDER, show_default=True,
+              help="Mailbox provider: outlook or gmail.")
 @click.option("--verbose", is_flag=True, help="Enable DEBUG logging.")
 def suggest(
     token: str | None,
@@ -351,7 +361,8 @@ def suggest(
     min_subject: int,
     fmt: str,
     output: Path | None,
-    base_url: str,
+    base_url: str | None,
+    provider: str,
     verbose: bool,
 ) -> None:
     """Read recent mail and propose rules for unfiled patterns. Read-only.
@@ -362,13 +373,13 @@ def suggest(
     """
     setup_logging(verbose=verbose)
     if not token:
-        raise click.UsageError("suggest needs a token. Pass --token or set OWA_TOKEN.")
+        raise click.UsageError("suggest needs a token. Pass --token or set MAIL_TOKEN/OWA_TOKEN.")
 
     try:
-        with OwaClient(token, base_url=base_url) as client:
+        with registry.build_provider(provider, {"token": token, "base_url": base_url}) as client:
             messages = client.list_messages(folder=folder, top=top)
             existing = client.list_rules()
-    except OwaApiError as exc:
+    except MailboxApiError as exc:
         raise click.ClickException(_format_api_error(exc)) from exc
 
     suggestions = suggest_rules(
@@ -490,7 +501,7 @@ def _parse_address_map(pairs: tuple[str, ...]) -> dict[str, str]:
     return mapping
 
 
-def _all_folders(client: OwaClient) -> list[Folder]:
+def _all_folders(client: MailboxProvider) -> list[Folder]:
     """Inbox child folders plus top-level folders, de-duplicated by id."""
     seen: dict[str, Folder] = {}
     for folder in client.list_inbox_folders() + client.list_all_folders():
@@ -620,7 +631,7 @@ def _resolve_flagged_actions(
             action.reason = "Skipped by user (cross-mailbox address)."
 
 
-def _execute_plan(client: OwaClient, plan: ApplyPlan, existing_folders: list[Folder]) -> None:
+def _execute_plan(client: MailboxProvider, plan: ApplyPlan, existing_folders: list[Folder]) -> None:
     """Create folders, then create/replace rules. Deletes only inside a REPLACE."""
     folder_ids: dict[str, str] = {}
     for folder in existing_folders:
@@ -657,6 +668,7 @@ def _execute_plan(client: OwaClient, plan: ApplyPlan, existing_folders: list[Fol
             sender_contains=rule.conditions.senderContains or None,
             stop_processing=rule.actions.stopProcessingRules,
             enabled=rule.enabled,
+            archive=rule.actions.archive,
         )
         created_rules += 1
         click.echo(f"  created rule {rule.name!r} (seq {action.sequence})")
@@ -694,7 +706,7 @@ def _offline_preview(
         normalize_folders=normalize_folders,
     )
     _print_plan(plan, existing_rules=[], mailbox=ruleset.source_mailbox)
-    click.echo("\nProvide --token (or set OWA_TOKEN) to detect conflicts and apply.")
+    click.echo("\nProvide --token (or set MAIL_TOKEN/OWA_TOKEN) to detect conflicts and apply.")
 
 
 def _render_suggestions(
@@ -724,12 +736,12 @@ def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
-def _format_api_error(exc: OwaApiError) -> str:
+def _format_api_error(exc: MailboxApiError) -> str:
     msg = str(exc)
     if exc.status in (401, 403):
         msg += (
-            "\nThe token was rejected. It may be expired (OWA tokens last ~1h) or "
-            "scoped for graph.microsoft.com instead of outlook.office.com. "
+            "\nThe token was rejected. It may be expired (mailbox tokens are short-lived, "
+            "about an hour) or missing the required scope. "
             "Run `rwz-importer token-help` for how to get a fresh one."
         )
     return msg

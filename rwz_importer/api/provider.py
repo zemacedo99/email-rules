@@ -13,12 +13,18 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from rwz_importer.api.capabilities import ProviderCapabilities
 from rwz_importer.api.owa_client import ExistingRule, Folder, Message
+
+__all__ = ["MailboxProvider", "ProviderCapabilities"]
 
 
 @runtime_checkable
 class MailboxProvider(Protocol):
     """The set of mailbox operations the tool and any agent depend on."""
+
+    # Capabilities ------------------------------------------------------------
+    def capabilities(self) -> ProviderCapabilities: ...
 
     # Folders -----------------------------------------------------------------
     def list_inbox_folders(self) -> list[Folder]: ...
@@ -39,6 +45,7 @@ class MailboxProvider(Protocol):
         sender_contains: list[str] | None = ...,
         stop_processing: bool = ...,
         enabled: bool = ...,
+        archive: bool = ...,
     ) -> ExistingRule: ...
     def delete_rule(self, rule_id: str) -> None: ...
 

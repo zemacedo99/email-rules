@@ -27,14 +27,14 @@ import hashlib
 import json
 from pathlib import Path
 
+from rwz_importer.api.errors import MailboxApiError
 from rwz_importer.api.owa_client import (
     ExistingRule,
     Folder,
     Message,
-    OwaApiError,
     normalize_folder_name,
 )
-from rwz_importer.api.provider import MailboxProvider
+from rwz_importer.api.provider import MailboxProvider, ProviderCapabilities
 from rwz_importer.engine import (
     ActionKind,
     ApplyPlan,
@@ -70,6 +70,22 @@ _ACTION_VERB = {
     ActionKind.REPLACE_RULE: "REPLACE",
     ActionKind.SKIP_RULE: "SKIP",
 }
+
+
+def _capabilities(provider: MailboxProvider) -> ProviderCapabilities:
+    """Read a provider's capabilities, defaulting to the Exchange baseline.
+
+    The default keeps test doubles and any provider written before ``capabilities()``
+    existed behaving exactly as the OWA client always has (ordered, stop-processing,
+    folder destinations, no separate archive toggle).
+    """
+    getter = getattr(provider, "capabilities", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:  # pragma: no cover - defensive: never let caps break a call
+            pass
+    return ProviderCapabilities()
 
 
 # ----------------------------------------------------------------- ruleset IO --
@@ -115,10 +131,11 @@ def list_folders(provider: MailboxProvider) -> list[dict]:
 
 
 def list_rules(provider: MailboxProvider) -> list[dict]:
-    """Return the inbox message rules currently on the server, ordered by sequence."""
-    rules = sorted(
-        provider.list_rules(), key=lambda r: (r.sequence is None, r.sequence or 0)
-    )
+    """Return the server's rules. Ordered providers (Exchange/Sieve) are sorted by
+    sequence; unordered ones (Gmail) keep the provider's own order."""
+    rules = list(provider.list_rules())
+    if _capabilities(provider).ordered_rules:
+        rules = sorted(rules, key=lambda r: (r.sequence is None, r.sequence or 0))
     return [_existing_rule_view(r) for r in rules]
 
 
@@ -210,6 +227,7 @@ def compute_plan(
         existing_rules=existing_rules,
         skipped_for_review=skipped,
         mailbox=mailbox,
+        caps=_capabilities(provider),
     )
 
 
@@ -236,7 +254,11 @@ def execute_plan(
         provider, ruleset, excludes, address_map, normalize_folders
     )
     view = _plan_view(
-        plan, existing_rules=existing_rules, skipped_for_review=skipped, mailbox=mailbox
+        plan,
+        existing_rules=existing_rules,
+        skipped_for_review=skipped,
+        mailbox=mailbox,
+        caps=_capabilities(provider),
     )
     token = view["confirmation_token"]
 
@@ -281,13 +303,15 @@ def create_rule(
     stop_processing: bool = True,
     enabled: bool = True,
     sequence: int | None = None,
+    archive: bool = True,
     normalize_folders: bool = True,
 ) -> dict:
     """Create one server-side rule directly (the UI's "add rule" path).
 
-    The destination folder is created if missing; the rule is appended at the next
-    free sequence unless one is given. Use :func:`update_rule` to change an existing
-    rule — this never deletes or replaces one.
+    The destination folder/label is created if missing; the rule is appended at the
+    next free sequence unless one is given. ``archive`` (remove from Inbox) is honoured
+    only by providers that expose it as a separate choice (Gmail); a move already
+    implies it elsewhere. Use :func:`update_rule` to change an existing rule.
     """
     clean_name = (name or "").strip()
     if not clean_name:
@@ -307,6 +331,7 @@ def create_rule(
         sender_contains=_clean_values(sender_contains),
         stop_processing=stop_processing,
         enabled=enabled,
+        archive=archive,
     )
     return {
         "created": _existing_rule_view(created),
@@ -325,13 +350,16 @@ def update_rule(
     move_to_folder: str | None = None,
     stop_processing: bool = True,
     enabled: bool = True,
+    archive: bool | None = None,
     normalize_folders: bool = True,
 ) -> dict:
     """Replace an existing rule in place (delete-then-create, reusing its sequence).
 
     This is the only delete the CRUD layer performs, and it is an explicit,
     user-initiated edit — the moral equivalent of a confirmed ``REPLACE``. Raises
-    :class:`ValueError` if ``rule_id`` is not present on the server.
+    :class:`ValueError` if ``rule_id`` is not present on the server. ``archive`` is
+    inherited from the existing rule when not given, so a caller that doesn't surface
+    the archive choice (today's web edit form) never silently flips it.
     """
     clean_name = (name or "").strip()
     if not clean_name:
@@ -359,6 +387,7 @@ def update_rule(
         sender_contains=_clean_values(sender_contains),
         stop_processing=stop_processing,
         enabled=enabled,
+        archive=existing.archive if archive is None else archive,
     )
     return {
         "updated": _existing_rule_view(created),
@@ -395,9 +424,9 @@ def preview_run(
     sequence order, so nothing is scheduled to move to two places. The flat ``moves``
     list is exactly what :func:`execute_run` consumes after the user confirms.
     """
-    ordered = sorted(
-        provider.list_rules(), key=lambda r: (r.sequence is None, r.sequence or 0)
-    )
+    ordered = list(provider.list_rules())
+    if _capabilities(provider).ordered_rules:
+        ordered = sorted(ordered, key=lambda r: (r.sequence is None, r.sequence or 0))
     if rule_ids is not None:
         wanted = set(rule_ids)
         selected = [r for r in ordered if r.id in wanted]
@@ -480,7 +509,7 @@ def execute_run(provider: MailboxProvider, moves: list[dict] | None) -> dict:
             moved.append(
                 {"message_id": message_id, "folder_id": folder_id, "new_id": new_id}
             )
-        except OwaApiError as exc:
+        except MailboxApiError as exc:
             failed.append(
                 {"message_id": message_id, "folder_id": folder_id, "error": str(exc)}
             )
@@ -573,6 +602,7 @@ def _execute(provider: MailboxProvider, plan: ApplyPlan, existing_folders: list[
             sender_contains=rule.conditions.senderContains or None,
             stop_processing=rule.actions.stopProcessingRules,
             enabled=rule.enabled,
+            archive=rule.actions.archive,
         )
         created_rules.append({"name": rule.name, "sequence": action.sequence})
 
@@ -680,7 +710,7 @@ def _collect_folders(provider: MailboxProvider) -> list[Folder]:
         if folder.child_folder_count > 0:
             try:
                 children = provider.list_child_folders(folder.id)
-            except OwaApiError:
+            except MailboxApiError:
                 continue  # best effort: an unreadable folder just stays unexpanded
             _enqueue(children)
     return list(seen.values())
@@ -697,7 +727,9 @@ def _plan_view(
     existing_rules: list[ExistingRule],
     skipped_for_review: list[str],
     mailbox: str | None = None,
+    caps: ProviderCapabilities | None = None,
 ) -> dict:
+    caps = caps or ProviderCapabilities()
     folders_to_create = [
         {
             "display_name": a.folder_display,
@@ -718,6 +750,7 @@ def _plan_view(
                 "move_to_folder": a.folder_display,
                 "conditions": rule.conditions.to_dict() if rule else {},
                 "stop_processing": rule.actions.stopProcessingRules if rule else None,
+                "archive": rule.actions.archive if rule else None,
                 "reason": a.reason,
                 "replaces_rule_id": a.existing_rule_id
                 if a.kind is ActionKind.REPLACE_RULE
@@ -738,7 +771,8 @@ def _plan_view(
         "rules": rules,
         "summary": counts,
         "skipped_for_review": skipped_for_review,
-        "confirmation_token": _plan_digest(plan),
+        "capabilities": caps.to_dict(),
+        "confirmation_token": _plan_digest(plan, caps),
     }
 
 
@@ -764,6 +798,7 @@ def _existing_rule_view(rule: ExistingRule) -> dict:
         },
         "move_to_folder_id": rule.move_to_folder_id,
         "stop_processing": rule.stop_processing,
+        "archive": rule.archive,
     }
 
 
@@ -773,14 +808,19 @@ def _suggestion_view(s: RuleSuggestion) -> dict:
     return data
 
 
-def _plan_digest(plan: ApplyPlan) -> str:
+def _plan_digest(plan: ApplyPlan, caps: ProviderCapabilities | None = None) -> str:
     """A stable digest of only the *write-effecting* parts of the plan.
 
     Folder creations and CREATE/REPLACE rules (with their assigned sequence,
     destination, conditions and flags) are hashed; skips and human-readable
     reasons are excluded. Recomputing against unchanged mailbox state yields the
     same token — any drift changes it, which is what gates a stale apply.
+
+    The base entry is the long-standing Exchange shape (unchanged, so existing
+    tokens are preserved); ``archive`` is appended only for providers that treat it
+    as a separate choice (Gmail), where it genuinely changes what would be written.
     """
+    caps = caps or ProviderCapabilities()
     payload: list = []
     for a in plan.folder_creations:
         payload.append(["FOLDER", (a.folder_create_name or a.folder_display or "").strip().lower()])
@@ -789,19 +829,20 @@ def _plan_digest(plan: ApplyPlan) -> str:
             continue
         rule = a.rule
         assert rule is not None
-        payload.append(
-            [
-                a.kind.value,
-                (rule.name or "").strip().lower(),
-                a.sequence,
-                (a.folder_display or "").strip().lower(),
-                sorted(x.strip().lower() for x in rule.conditions.fromAddresses),
-                sorted(x.strip().lower() for x in rule.conditions.subjectContains),
-                sorted(x.strip().lower() for x in rule.conditions.senderContains),
-                bool(rule.actions.stopProcessingRules),
-                bool(rule.enabled),
-                a.existing_rule_id or "",
-            ]
-        )
+        entry = [
+            a.kind.value,
+            (rule.name or "").strip().lower(),
+            a.sequence,
+            (a.folder_display or "").strip().lower(),
+            sorted(x.strip().lower() for x in rule.conditions.fromAddresses),
+            sorted(x.strip().lower() for x in rule.conditions.subjectContains),
+            sorted(x.strip().lower() for x in rule.conditions.senderContains),
+            bool(rule.actions.stopProcessingRules),
+            bool(rule.enabled),
+            a.existing_rule_id or "",
+        ]
+        if caps.archive_toggle:
+            entry.append(bool(rule.actions.archive))
+        payload.append(entry)
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return "v1:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]

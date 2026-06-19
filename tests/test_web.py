@@ -17,8 +17,14 @@ pytest.importorskip("multipart")  # python-multipart, for the upload endpoint
 from starlette.testclient import TestClient  # noqa: E402
 
 from rwz_importer.api.owa_client import ExistingRule, Folder, Message  # noqa: E402
+from rwz_importer.api.provider import ProviderCapabilities  # noqa: E402
 from rwz_importer.web.app import _SAMPLE_ALL, _sample_top, create_app  # noqa: E402
 from tests.test_service import FakeMailbox  # noqa: E402
+
+_GMAIL_CAPS = ProviderCapabilities(
+    ordered_rules=False, stop_processing=False, destination_kind="label",
+    archive_toggle=True, hierarchical_folders=False,
+)
 
 
 @pytest.fixture
@@ -42,8 +48,13 @@ def test_index_is_served(client: TestClient) -> None:
 def test_config_reports_token_set_but_never_returns_token(client: TestClient) -> None:
     res = client.post("/api/config", json={"token": "secret-abc", "mailbox": "me@x.com"})
     body = res.json()
-    assert body == {"token_set": True, "mailbox": "me@x.com", "base_url": body["base_url"]}
+    assert body["token_set"] is True and body["mailbox"] == "me@x.com"
+    assert "token" not in body  # only token_set, never the value
     assert "secret-abc" not in res.text  # token value never echoed
+    # Provider-aware fields the UI relies on to render terminology.
+    assert body["provider"] == "outlook"
+    assert body["capabilities"]["destination_kind"] == "folder"
+    assert {p["id"] for p in body["providers"]} == {"outlook", "gmail"}
 
     got = client.get("/api/config").json()
     assert got["token_set"] is True and got["mailbox"] == "me@x.com"
@@ -51,6 +62,33 @@ def test_config_reports_token_set_but_never_returns_token(client: TestClient) ->
 
     cleared = client.post("/api/config", json={"clear_token": True}).json()
     assert cleared["token_set"] is False
+
+
+def test_create_rule_threads_archive_through_web() -> None:
+    """A Gmail-capability backend must receive the per-rule archive choice from POST."""
+    fake = FakeMailbox(capabilities=_GMAIL_CAPS)
+    web = TestClient(create_app(lambda: fake))
+    res = web.post(
+        "/api/rules",
+        json={
+            "name": "News",
+            "conditions": {"fromAddresses": ["a@x.com"]},
+            "move_to_folder": "Newsletters",
+            "archive": False,
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["created"]["archive"] is False
+    assert fake.created_rules[-1]["archive"] is False
+
+
+def test_config_switch_provider_clears_token_and_reports_capabilities(client: TestClient) -> None:
+    client.post("/api/config", json={"token": "secret-abc"})
+    switched = client.post("/api/config", json={"provider": "gmail"}).json()
+    assert switched["provider"] == "gmail"
+    assert switched["token_set"] is False  # a token is provider-specific; switching clears it
+    assert switched["capabilities"]["destination_kind"] == "label"
+    assert switched["capabilities"]["archive_toggle"] is True
 
 
 def test_auth_start_returns_code_but_never_the_device_secret(client, monkeypatch) -> None:

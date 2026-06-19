@@ -19,7 +19,8 @@
       },
       "actions": {
         "moveToFolder": "Meeting Invites",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -40,7 +41,8 @@
       },
       "actions": {
         "moveToFolder": "SI HelpDesk",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -61,7 +63,8 @@
       },
       "actions": {
         "moveToFolder": "Confluence",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -82,7 +85,8 @@
       },
       "actions": {
         "moveToFolder": "Email LabOps",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": true,
@@ -104,7 +108,8 @@
       },
       "actions": {
         "moveToFolder": "ACMESUP",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -125,7 +130,8 @@
       },
       "actions": {
         "moveToFolder": "PRJX – Project Phoenix",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -146,7 +152,8 @@
       },
       "actions": {
         "moveToFolder": "Org News",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -167,7 +174,8 @@
       },
       "actions": {
         "moveToFolder": "Bitbucket",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -188,7 +196,8 @@
       },
       "actions": {
         "moveToFolder": "Report",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -209,7 +218,8 @@
       },
       "actions": {
         "moveToFolder": "Sharepoint",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -230,7 +240,8 @@
       },
       "actions": {
         "moveToFolder": "Training",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -251,7 +262,8 @@
       },
       "actions": {
         "moveToFolder": "Teams",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
@@ -273,7 +285,8 @@
       },
       "actions": {
         "moveToFolder": "Weekly Digest",
-        "stopProcessingRules": true
+        "stopProcessingRules": true,
+        "archive": true
       },
       "flags": {
         "addressMayBelongToDifferentMailbox": false,
