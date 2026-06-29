@@ -115,7 +115,9 @@ class _Config:
             "base_url": self.base_url or info["default_base_url"],
             "capabilities": info["capabilities"],
             "providers": registry.all_provider_info(),
-            # Whether a Google OAuth client is configured (booleans only, never the values).
+            # The client id is not secret (it travels in the auth URL), so it can pre-fill the
+            # form; the client *secret* is never exposed — only whether one is set.
+            "google_client_id": self.google_client_id or "",
             "google_client_set": bool(self.google_client_id and self.google_client_secret),
             # IMAP connection fields minus the password (only a boolean for that).
             "imap": imap_public,

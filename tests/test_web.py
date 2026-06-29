@@ -114,7 +114,8 @@ def test_google_client_creds_are_never_echoed() -> None:
         "/api/config", json={"google_client_id": "cid-123", "google_client_secret": "sec-xyz"}
     ).json()
     assert body["google_client_set"] is True
-    assert "google_client_secret" not in body and "sec-xyz" not in str(body)
+    assert body["google_client_id"] == "cid-123"  # the id is not secret — it pre-fills the form
+    assert "google_client_secret" not in body and "sec-xyz" not in str(body)  # the secret never is
 
 
 def test_google_signin_flow_sets_token_without_echoing_it(monkeypatch) -> None:

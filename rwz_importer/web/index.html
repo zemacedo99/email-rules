@@ -416,25 +416,43 @@
               automatically — no DevTools needed.</span>
           </div>
 
-          <!-- Gmail only: full Google OAuth (needs the user's own Desktop OAuth client) -->
+          <!-- Gmail only: the easy, zero-setup path is the pasted token below. Persistent
+               sign-in (needs the user's own OAuth client) is tucked into this advanced box. -->
           <div id="gmailSignin" class="hidden" style="margin-top:14px">
-            <p class="hint" style="margin:0 0 8px">Persistent sign-in needs your own Google OAuth
-              client (type <b>Desktop app</b>, Gmail API enabled). Paste its id &amp; secret, then
-              sign in — you'll get a refresh token so the session survives token expiry.</p>
-            <div class="row">
-              <div>
-                <label for="gClientId">Google client ID</label>
-                <input id="gClientId" type="text" placeholder="…apps.googleusercontent.com" autocomplete="off" />
+            <p class="hint" style="margin:0 0 8px"><b>Quickest:</b> paste a token below — no Google
+              Cloud setup needed. Want a login that stays signed in? Set up your own OAuth client once:</p>
+            <details class="advanced">
+              <summary>Stay signed in across sessions (advanced — one-time Google setup)</summary>
+              <p class="hint" style="margin:8px 0 6px">The pasted token expires in about an hour. A
+                persistent sign-in uses your own Google OAuth client and refreshes itself.</p>
+              <details class="advanced">
+                <summary>How do I get a client ID &amp; secret? →</summary>
+                <ol class="steps">
+                  <li>Open the <a class="plain" href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener"><b>Google Cloud Console ↗</b></a> and create (or pick) a project.</li>
+                  <li><b>APIs &amp; Services → Library</b> → search <b>Gmail API</b> → <b>Enable</b>.</li>
+                  <li><b>OAuth consent screen</b> → User type <b>External</b> → add your own address under <b>Test users</b>.</li>
+                  <li><b>Credentials → Create credentials → OAuth client ID</b> → Application type <b>Desktop app</b>.</li>
+                  <li>Copy the <b>Client ID</b> and <b>Client secret</b> it shows into the fields below.</li>
+                </ol>
+                <p class="hint" style="margin:4px 0 0">Or set them once via the
+                  <code>GOOGLE_OAUTH_CLIENT_ID</code> / <code>GOOGLE_OAUTH_CLIENT_SECRET</code>
+                  environment variables and they'll be pre-filled here.</p>
+              </details>
+              <div class="row" style="margin-top:10px">
+                <div>
+                  <label for="gClientId">Google client ID</label>
+                  <input id="gClientId" type="text" placeholder="…apps.googleusercontent.com" autocomplete="off" />
+                </div>
+                <div>
+                  <label for="gClientSecret">Google client secret</label>
+                  <input id="gClientSecret" type="password" placeholder="GOCSPX-…" autocomplete="off" />
+                </div>
               </div>
-              <div>
-                <label for="gClientSecret">Google client secret</label>
-                <input id="gClientSecret" type="password" placeholder="GOCSPX-…" autocomplete="off" />
+              <div class="signin" style="margin-top:12px">
+                <button class="primary" id="gSignInBtn">Sign in with Google</button>
+                <span class="muted">Opens Google's consent page and captures the token (and a refresh token).</span>
               </div>
-            </div>
-            <div class="signin" style="margin-top:12px">
-              <button class="primary" id="gSignInBtn">Sign in with Google</button>
-              <span class="muted">Opens Google's consent page and captures the token automatically.</span>
-            </div>
+            </details>
           </div>
 
           <details class="advanced" id="manualBox">
@@ -621,7 +639,16 @@ function applyProviderUI() {
   if ($("gmailHelp")) $("gmailHelp").classList.toggle("hidden", !isGmail);
   // IMAP uses host/credentials instead of a token: swap the token UI for the IMAP form.
   if ($("imapForm")) $("imapForm").classList.toggle("hidden", !isImap);
-  if ($("manualBox")) $("manualBox").classList.toggle("hidden", isImap);
+  if ($("manualBox")) {
+    $("manualBox").classList.toggle("hidden", isImap);
+    // For Gmail the pasted token is the easy, zero-setup path, so open it by default and
+    // label it as such; Outlook keeps it collapsed as a fallback to the sign-in button.
+    $("manualBox").open = isGmail;
+    if ($("manualSummary"))
+      $("manualSummary").textContent = isGmail
+        ? "Paste a token  (quickest — no Google Cloud setup)"
+        : "Paste an access token manually";
+  }
   if ($("baseUrlField")) $("baseUrlField").classList.toggle("hidden", isImap);
 }
 function applyConfig(c) {
@@ -639,6 +666,9 @@ function applyConfig(c) {
   if ($("imSieveHost")) $("imSieveHost").value = im.sieve_host || "";
   if ($("imSievePort")) $("imSievePort").value = im.sieve_port || 4190;
   if ($("imPass")) $("imPass").placeholder = c.imap_password_set ? "saved — leave blank to keep" : "app password";
+  // Pre-fill the (non-secret) Google client id; show whether a secret is already saved.
+  if ($("gClientId")) $("gClientId").value = c.google_client_id || "";
+  if ($("gClientSecret")) $("gClientSecret").placeholder = c.google_client_set ? "saved — leave blank to keep" : "GOCSPX-…";
   applyProviderUI();
   setConnected(!!c.connected);
 }
@@ -712,11 +742,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ---- sign in with Google (loopback OAuth; redirects back to this server) --- */
 async function signInGoogle() {
+  // Send only the fields the user typed; if creds are already set (env/config) they can just
+  // click Sign in. If none are set anywhere, /start replies with a clear "add your client" error.
+  const patch = {};
   const cid = $("gClientId").value.trim();
   const sec = $("gClientSecret").value.trim();
-  if (!cid || !sec) { toast("Enter your Google client ID and secret first.", "bad"); return; }
+  if (cid) patch.google_client_id = cid;
+  if (sec) patch.google_client_secret = sec;
   try {
-    await api("POST", "/api/config", { google_client_id: cid, google_client_secret: sec });
+    if (Object.keys(patch).length) await api("POST", "/api/config", patch);
     const start = await api("POST", "/api/auth/google/start", {});
     const win = window.open(start.auth_url, "_blank", "noopener");
     if (!win) toast("Allow pop-ups for this page, then click Sign in with Google again.", "bad");
