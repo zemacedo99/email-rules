@@ -1,6 +1,6 @@
-"""Parser tests pinned to the real ``sample_rules.rwz`` fixture.
+"""Parser tests pinned to the synthetic ``sample_rules.rwz`` fixture.
 
-These lock in the validated reading of the binary: 13 rules, clean addresses
+These lock in the reading of the binary (built by ``fixtures/make_sample_rwz.py``): 13 rules, clean addresses
 (no ``SMTP:``/X.500 leakage), exact subject keywords, the cross-mailbox flag, and
 the merged Weekly Digest & Viva Engage rule.
 """

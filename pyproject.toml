@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = [
-    "mcp>=1.2",
+    "mcp>=1.2,<2",
 ]
 web = [
     "starlette>=0.37",
@@ -30,7 +30,7 @@ imap = [
 ]
 dev = [
     "pytest>=7.0",
-    "mcp>=1.2",
+    "mcp>=1.2,<2",
     "starlette>=0.37",
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
